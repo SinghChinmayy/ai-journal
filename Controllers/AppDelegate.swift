@@ -1,0 +1,396 @@
+import Cocoa
+import KeyboardShortcuts
+import os.log
+
+@main
+@MainActor
+class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenuItemValidation {
+    var mainWindowController: MainWindowController?
+    var prefsWindowController: PrefsWindowController?
+    var aboutWindowController: AboutWindowController?
+    var statusItem: NSStatusItem?
+    public var urls: [URL]?
+    public var searchQuery: String?
+    public var newName: String?
+    public var newContent: String?
+    let appContext = AppContext.shared
+
+    private func resolveViewController() -> ViewController? {
+        if let cached = appContext.viewController {
+            return cached
+        }
+
+        let candidates: [NSViewController?] = [
+            mainWindowController?.window?.contentViewController,
+            mainWindowController?.contentViewController,
+            NSApp.mainWindow?.contentViewController,
+            NSApp.keyWindow?.contentViewController,
+        ]
+
+        for candidate in candidates {
+            if let vc = candidate as? ViewController {
+                appContext.bind(viewController: vc)
+                return vc
+            }
+        }
+
+        return nil
+    }
+    var appTitle: String {
+        if let display = Bundle.main.object(forInfoDictionaryKey: "CFBundleDisplayName") as? String {
+            return display
+        }
+        return Bundle.main.object(forInfoDictionaryKey: kCFBundleNameKey as String) as? String ?? "Nextpage"
+    }
+
+    func applicationWillFinishLaunching(_ notification: Notification) {
+        UserDefaultsManagement.clearSingleMode()
+        let storage = appContext.storage
+        storage.loadProjects()
+        storage.loadDocuments {}
+    }
+
+    func applicationDidFinishLaunching(_ aNotification: Notification) {
+        NSApp.mainMenu?.applyMenuIcons()
+
+        NSApp.mainMenu?.update()
+
+        configureSystemLogging()
+        NSFontManager.shared.fontPanel(false)?.orderOut(self)
+
+        applyAppearance()
+
+        addGlobalKeyboardMonitor()
+        if UserDefaultsManagement.storageUrl == nil {
+            requestStorageDirectory()
+            return
+        }
+        let storyboard = NSStoryboard(name: "Main", bundle: nil)
+        guard let mainWC = storyboard.instantiateController(withIdentifier: "MainWindowController") as? MainWindowController else {
+            let alert = NSAlert()
+            alert.alertStyle = .critical
+            alert.messageText = I18n.str("Critical Error")
+            alert.informativeText = I18n.str("Failed to initialize main window. Please restart the application.")
+            alert.addButton(withTitle: I18n.str("Quit"))
+            alert.runModal()
+
+            NSApplication.shared.terminate(nil)
+            return
+        }
+        normalizeMainWindowFrame(mainWC.window)
+
+        // Apply fade-in for first launch to match re-open behavior and hide initial blank state
+        mainWC.window?.alphaValue = 0
+        mainWC.window?.makeKeyAndOrderFront(nil)
+
+        mainWindowController = mainWC
+        appContext.bind(viewController: mainWC.window?.contentViewController as? ViewController)
+        normalizeMainWindowFrame(mainWC.window)
+        DispatchQueue.main.async { [weak self, weak window = mainWC.window] in
+            self?.normalizeMainWindowFrame(window)
+        }
+
+        mainWC.applyNextpageAppearance()
+
+        // Failsafe: Ensure window reveals after 3 seconds even if list loading hangs or fails
+        DispatchQueue.main.asyncAfter(deadline: .now() + 3.0) {
+            mainWC.revealWindowWhenReady()
+        }
+
+        if KeyboardShortcuts.getShortcut(for: .activateWindow) == nil {
+            KeyboardShortcuts.setShortcut(.init(.m, modifiers: [.command, .option]), for: .activateWindow)
+        }
+
+    }
+
+    func applicationWillTerminate(_ aNotification: Notification) {
+        UserDefaultsManagement.clearSingleMode()
+        if let vc = resolveViewController() {
+            vc.persistCurrentViewState()
+            // Capture the current editor buffer into the active note before
+            // we drain the debounce queue, otherwise an in-flight keystroke
+            // from the last 1.5s would never reach Note.content.
+            if let activeNote = EditTextView.note {
+                vc.editArea.saveTextStorageContent(to: activeNote)
+            }
+            vc.storage.flushPendingSaves()
+        }
+        try? FileManager.default.removeItem(at: HtmlManager.previewBundleURL())
+        var temporary = URL(fileURLWithPath: NSTemporaryDirectory())
+        temporary.appendPathComponent("ThumbnailsBig")
+        try? FileManager.default.removeItem(at: temporary)
+    }
+
+    static func trackError(_ error: Error, context: String) {
+        #if DEBUG
+            print("Error in \(context): \(error)")
+        #endif
+        Diagnostics.record(error: error, context: context)
+    }
+
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        if !flag {
+            applyAppearance()
+            mainWindowController?.makeNew()
+        }
+        return true
+    }
+
+    func applyAppearance() {
+        if UserDefaultsManagement.appearanceType != .Custom {
+            var targetAppearance: NSAppearance?
+            var isDark = false
+
+            switch UserDefaultsManagement.appearanceType {
+            case .Dark:
+                targetAppearance = NSAppearance(named: .darkAqua)
+                isDark = true
+            case .Light:
+                targetAppearance = NSAppearance(named: .aqua)
+                isDark = false
+            case .System:
+                targetAppearance = nil
+                isDark = NSAppearance.current.isDark
+            default:
+                targetAppearance = nil
+                isDark = NSAppearance.current.isDark
+            }
+
+            UserDataService.instance.isDark = isDark
+
+            if NSApp.appearance != targetAppearance {
+                NSApp.appearance = targetAppearance
+            }
+        }
+    }
+
+    private func restartApp() {
+        AppDelegate.relaunchApp()
+    }
+
+    private func requestStorageDirectory() {
+        var directoryURL: URL?
+        if let path = NSSearchPathForDirectoriesInDomains(.documentDirectory, .userDomainMask, true).first {
+            directoryURL = URL(fileURLWithPath: path)
+        }
+        let panel = NSOpenPanel()
+        panel.directoryURL = directoryURL
+        panel.allowsMultipleSelection = false
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.canCreateDirectories = true
+        panel.message = I18n.str("Please select default storage directory")
+        panel.begin { result in
+            if result == NSApplication.ModalResponse.OK {
+                guard let url = panel.url else {
+                    return
+                }
+                do {
+                    try StorageLocationValidator.validateWritableDirectory(url)
+                } catch {
+                    self.showStorageDirectoryError(error) {
+                        self.requestStorageDirectory()
+                    }
+                    return
+                }
+                UserDefaultsManagement.storagePath = url.path
+                do {
+                    let bookmarkData = try url.bookmarkData(
+                        options: .withSecurityScope,
+                        includingResourceValuesForKeys: nil,
+                        relativeTo: nil)
+                    UserDefaultsManagement.storageBookmark = bookmarkData
+                } catch {
+                    AppDelegate.trackError(error, context: "AppDelegate.requestStorageDirectory.bookmarkData")
+                }
+                self.restartApp()
+            } else {
+                exit(EXIT_SUCCESS)
+            }
+        }
+    }
+
+    private func showStorageDirectoryError(_ error: Error, completion: @escaping () -> Void) {
+        let message: String
+        if let validationError = error as? StorageLocationValidationError {
+            message = validationError.localizedMessage
+        } else {
+            message = error.localizedDescription
+        }
+        NextpageAlert.show(
+            message: I18n.str("Could not use this folder"),
+            informativeText: message,
+            style: .warning,
+            for: NSApp.keyWindow ?? NSApp.mainWindow
+        ) { _ in
+            completion()
+        }
+    }
+
+    private func normalizeMainWindowFrame(_ window: NSWindow?) {
+        guard let window else { return }
+
+        let savedFrame = window.frame
+        let isOffScreen = NSScreen.screens.allSatisfy { screen in
+            !screen.visibleFrame.intersects(savedFrame)
+        }
+        let layoutMinimum = NSSize(width: 1100, height: 680)
+        let isTooSmall = savedFrame.width < layoutMinimum.width || savedFrame.height < layoutMinimum.height
+
+        window.minSize = NSSize(width: 960, height: 600)
+
+        guard UserDefaultsManagement.isFirstLaunch || isTooSmall || isOffScreen else { return }
+
+        let preferredSize = NSSize(width: 1280, height: 760)
+        let visibleFrame = window.screen?.visibleFrame ?? NSScreen.main?.visibleFrame
+        let targetFrame: NSRect
+        if let visibleFrame {
+            let size = NSSize(
+                width: min(preferredSize.width, max(900, visibleFrame.width - 40)),
+                height: min(preferredSize.height, max(620, visibleFrame.height - 40))
+            )
+            targetFrame = NSRect(
+                x: visibleFrame.midX - size.width / 2,
+                y: visibleFrame.midY - size.height / 2,
+                width: size.width,
+                height: size.height
+            )
+        } else {
+            targetFrame = NSRect(origin: savedFrame.origin, size: preferredSize)
+        }
+
+        window.setFrame(targetFrame, display: true)
+    }
+
+    // MARK: IBActions
+    @IBAction func openMainWindow(_ sender: Any) {
+        mainWindowController?.makeNew()
+    }
+    @IBAction func checkForUpdates(_ sender: Any?) {
+        NextpageAlert.show(
+            message: I18n.str("Updates are not available in this development build."),
+            style: .informational,
+            for: NSApp.keyWindow ?? NSApp.mainWindow
+        )
+    }
+    @IBAction func openPreferences(_ sender: Any?) {
+        if prefsWindowController == nil {
+            prefsWindowController = PrefsWindowController()
+        }
+        prefsWindowController?.showGlobalPromptSettings()
+    }
+
+    func openPromptSettings(for project: Project?) {
+        if prefsWindowController == nil {
+            prefsWindowController = PrefsWindowController()
+        }
+        prefsWindowController?.showPromptSettings(for: project)
+    }
+    @IBAction func new(_ sender: Any?) {
+        mainWindowController?.makeNew()
+        NSApp.activate(ignoringOtherApps: true)
+        resolveViewController()?.fileMenuNewNote(self)
+    }
+    @IBAction func searchAndCreate(_ sender: Any?) {
+        mainWindowController?.makeNew()
+        NSApp.activate(ignoringOtherApps: true)
+        guard let vc = resolveViewController() else { return }
+        DispatchQueue.main.async {
+            vc.search.window?.makeFirstResponder(vc.search)
+        }
+    }
+    @IBAction func showAboutWindow(_ sender: AnyObject) {
+        if aboutWindowController == nil {
+            let storyboard = NSStoryboard(name: "Main", bundle: nil)
+            aboutWindowController = storyboard.instantiateController(withIdentifier: "About") as? AboutWindowController
+        }
+        guard let aboutWindowController = aboutWindowController else { return }
+        aboutWindowController.showWindow(nil)
+        aboutWindowController.window?.makeKeyAndOrderFront(aboutWindowController)
+        NSApp.activate(ignoringOtherApps: true)
+    }
+
+    func menuWillOpen(_ menu: NSMenu) {
+        guard let event = NSApp.currentEvent else { return }
+        if event.type == NSEvent.EventType.leftMouseDown {
+            mainWindowController?.makeNew()
+        }
+    }
+
+    @IBAction func toggleAlwaysOnTop(_ sender: NSMenuItem) {
+        toggleAlwaysOnTop()
+    }
+
+    func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
+        if menuItem.identifier?.rawValue == "viewMenu.alwaysOnTop" {
+            menuItem.state = UserDefaultsManagement.alwaysOnTop ? .on : .off
+            return true
+        }
+        // Only validate menu items that AppDelegate can actually handle
+        if let action = menuItem.action {
+            return self.responds(to: action)
+        }
+        return true
+    }
+
+    func applicationSupportsSecureRestorableState(_ app: NSApplication) -> Bool {
+        return true
+    }
+    // MARK: - Logging Configuration
+    private func configureSystemLogging() {
+        setenv("OS_ACTIVITY_MODE", "disable", 1)
+        setenv("MTL_HUD_ENABLED", "0", 1)
+        setenv("MTL_DEBUG_LAYER", "0", 1)
+        setenv("MTL_SHADER_VALIDATION", "0", 1)
+        setenv("MTL_CAPTURE_ENABLED", "0", 1)
+        setenv("METAL_PERFORMANCE_SHADERS_LOGGING", "0", 1)
+        configureURLCache()
+    }
+
+    private func configureURLCache() {
+        let memoryCapacity = 50 * 1024 * 1024  // 50MB
+        let diskCapacity = 0  // Disable disk cache to prevent I/O errors
+        let cache = URLCache(memoryCapacity: memoryCapacity, diskCapacity: diskCapacity, diskPath: nil)
+        URLCache.shared = cache
+    }
+
+    // MARK: - Always On Top Management
+    private func toggleAlwaysOnTop() {
+        let newValue = !UserDefaultsManagement.alwaysOnTop
+        UserDefaultsManagement.alwaysOnTop = newValue
+
+        NotificationCenter.default.post(name: .alwaysOnTopChanged, object: nil)
+
+        if let vc = resolveViewController() {
+            let message = newValue ? I18n.str("Window stays on top") : I18n.str("Window normal mode")
+            vc.toast(message: message)
+        }
+    }
+
+    private func addGlobalKeyboardMonitor() {
+        NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
+            let flags = event.modifierFlags.intersection([.command, .shift, .option, .control])
+            let key = event.charactersIgnoringModifiers?.lowercased()
+
+            if event.keyCode == 17 || key == "t",  // kVK_ANSI_T
+                flags == [.command, .shift]
+            {
+                if let vc = self.resolveViewController() {
+                    vc.pin(vc.notesTableView.selectedRowIndexes)
+                    return nil
+                }
+            }
+
+            if event.keyCode == 35 || key == "p",  // kVK_ANSI_P
+                flags == [.command, .option]
+            {
+                if let vc = self.resolveViewController() {
+                    vc.toggleMagicPPT(self)
+                    return nil
+                }
+            }
+
+            return event
+        }
+    }
+}

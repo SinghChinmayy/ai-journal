@@ -1,0 +1,324 @@
+/* About Window */
+"About" = "关于";
+
+/* No comment provided by engineer. */
+"Add" = "添加";
+
+/* No comment provided by engineer. */
+"Are you sure you want to move %d note(s) to the system Trash?" = "确定要将%d个笔记移入系统废纸篓？";
+
+/* No comment provided by engineer. */
+"Are you sure you want to remove project \"%@\" and all files inside?" = "您确定要删除项目\"%@\"和它下面的所有文件吗？";
+
+/* Delete menu */
+"Cancel" = "取消";
+
+/* No comment provided by engineer. */
+"Copy HTML" = "拷贝HTML";
+
+/* No comment provided by engineer. */
+"Copy Link" = "拷贝链接";
+
+/* No comment provided by engineer. */
+"Copy Plain Text" = "拷贝纯文本";
+
+/* No comment provided by engineer. */
+"Delete" = "删除";
+
+/* No comment provided by engineer. */
+"Delete Folder" = "删除文件夹";
+
+/* No comment provided by engineer. */
+"Nextpage [preview]" = "Nextpage [预览]";
+
+/* No comment provided by engineer. */
+"Link" = "链接";
+
+/* Menu */
+"Move" = "移动";
+
+/* Menu */
+"Export" = "导出";
+
+/* No comment provided by engineer. */
+"New" = "新建";
+
+/* No comment provided by engineer. */
+"New Folder" = "新建文件夹";
+
+/* No comment provided by engineer. */
+"New Subfolder" = "新建子文件夹";
+
+/* No comment provided by engineer. */
+"New project" = "新建文件夹";
+
+/* Sidebar label */
+"Notes" = "Nextpage";
+
+/* No comment provided by engineer. */
+"OK" = "好的";
+
+/* Edit area */
+"Please enter image title:" = "请输入图片标题：";
+
+/* No comment provided by engineer. */
+"Please enter project name:" = "请输入名称：";
+
+/* No comment provided by engineer. */
+"Please try again" = "请再试一次";
+
+/* No comment provided by engineer. */
+"Preferences" = "偏好设置";
+
+/* No comment provided by engineer. */
+"Quit Nextpage" = "退出Nextpage";
+
+/* Delete menu */
+"Remove" = "移除";
+
+/* No comment provided by engineer. */
+"Move to Trash" = "移入废纸篓";
+
+/* No comment provided by engineer. */
+"Rename Folder" = "重命名文件夹";
+
+/* No comment provided by engineer. */
+"Show in Finder" = "在Finder中显示";
+"Open in Terminal" = "在终端中打开";
+
+/* View menu */
+"Sort by" = "排序方式";
+
+/* No comment provided by engineer. */
+"Strikethrough" = "删除线";
+
+/* Delete menu */
+"The note(s) will be moved to the system Trash and can be recovered." = "笔记将被移入系统废纸篓，可在废纸篓中找回。";
+
+/* Delete menu */
+"This action cannot be undone." = "此操作无法恢复。";
+
+/* No comment provided by engineer. */
+"Toggle Preview" = "预览";
+
+/* Sidebar label */
+"Trash" = "删除";
+
+/* No comment provided by engineer. */
+"Underline" = "下划线";
+
+/* Untitled Note */
+"Untitled Note" = "无标题";
+
+/* No comment provided by engineer. */
+"URL has been copied to clipboard" = "URL已复制到剪贴板";
+
+/* Menu */
+"View" = "视图";
+
+"Search" = "搜索";
+
+
+
+/* Clean attachments */
+"Clean Orphan Attachments" = "清理孤立附件";
+"Detected %d unused attachment(s). Move them to Trash?" = "检测到%d个未被引用的附件，是否移动到垃圾桶？";
+"No orphan attachments found" = "没有检测到孤立附件";
+"Removed %d unused attachment(s)" = "已清理%d个无引用附件";
+"Some attachments could not be removed" = "部分附件无法清理";
+"Clean" = "清理";
+
+
+"%d Nextpage" = "%d 篇Nextpage";
+
+
+
+/* Toast messages without emoji prefix */
+"Automatic typesetting succeeded~" = "自动化排版完成~";
+"Typography cleaned up~" = "排版净化完成~";
+"Typography is already clean~" = "排版已经很干净了~";
+"Press ESC key to exit~" = "按 ESC 键退出演示~";
+"Format is only possible after exiting preview mode~" = "文档排版需要退出预览模式才可使用~";
+"Saved to Downloads folder~" = "已导出到下载目录~";
+"Saved~" = "已保存~";
+"Click the title again to rename~" = "标题未保存,请再次点击标题后修改~";
+"External change detected. Local copy backed up~" = "检测到外部修改,本地内容已备份~";
+"Switching notes is disabled during export~" = "导出过程中无法切换笔记~";
+"Failed to move %d note(s) to Trash~" = "%d 条笔记未能移入回收站,可能受权限或同步限制~";
+"Image upload in progress~" = "图片上传中~";
+"Image upload failed, Use local~" = "图片上传失败，优先使用本地，可手动上传~";
+"Please make sure your Mac is installed %@ ~" = "请确保你的 Mac 已安装并配置好了 %@ ~";
+"In single open mode, Exit with Command+Shift+W ~" = "单独编辑器模式中，可 Command+Shift+W 退出~";
+"Please make sure your title exists~" = "请确定你填写的标题是否存在~";
+"Found that there are multiple titles of this~" = "发现这里有多个标题，使用搜索能力~";
+"URL is successfully copied, Use it anywhere~" = "外链成功复制，你可以在任何地方使用~";
+"Path is successfully copied~" = "路径成功复制~";
+"No delimiter --- identification, Cannot use Nextpage PPT~" = "没有分隔符 --- 标识，无法使用Nextpage PPT~";
+"Formatting failed, please try again" = "排版失败，请重试";
+"Formatting cancelled" = "已取消排版";
+
+"This %@ under this folder already exists!" = "此文件夹下 %@ 已经存在!";
+"Please change the title" = "请换一个标题";
+
+"Edit Link…" = "编辑链接";
+"Remove Link" = "移除链接";
+
+"Restart to Nextpage to take effect" = "重新启动Nextpage后生效";
+"Confirm" = "确定";
+
+/* Font Names */
+
+/* Preferences Categories */
+"General" = "通用";
+"Editor" = "编辑器";
+
+/* Preferences Settings */
+"Fonts" = "字体";
+"Editor Behavior" = "编辑器行为";
+"Preview Settings" = "预览设置";
+"Preview" = "预览";
+"Editor Font:" = "编辑字体:";
+"Interface Font:" = "界面字体:";
+"Preview Font:" = "预览字体:";
+"Code Font:" = "代码字体:";
+"Presentation Font Size:" = "演示大小:";
+"Line Break:" = "换行方式:";
+"Code Background:" = "代码背景:";
+"Preview Location:" = "预览位置:";
+"Preview Width:" = "预览宽度:";
+"Editor Mode:" = "编辑模式:";
+"Split Mode" = "分栏模式";
+"Pure Editing" = "纯编辑";
+
+/* Interface Settings */
+
+"Button Display:" = "按钮显示:";
+"Always" = "始终显示";
+"On Hover" = "悬停显示";
+"Never" = "从不显示";
+
+/* Image Upload Settings */
+"Image Upload" = "图片上传";
+"Upload Service:" = "上传服务:";
+
+/* General Settings Labels */
+"Appearance:" = "外观颜色:";
+"Language:" = "界面语言:";
+"Always On Top:" = "置顶显示:";
+"Activate Shortcut:" = "快捷唤起:";
+"Yes" = "是";
+"No" = "否";
+"Appearance & Language" = "外观与语言";
+"Interface & Upload" = "界面与上传";
+"Note Location" = "笔记位置";
+"Interface" = "界面";
+"Experience" = "体验";
+"Typography" = "编辑";
+"Storage Location" = "存储位置";
+"Change" = "更改";
+"System" = "跟随系统";
+"Light" = "浅色";
+"Dark" = "深色";
+"None" = "无";
+"Begin" = "开头";
+"End" = "结尾";
+"Right" = "右侧";
+"Bottom" = "底部";
+"Editing" = "编辑";
+"Full Width" = "全宽";
+"Nextpage" = "Nextpage";
+"Auto" = "自动";
+"Github" = "Github";
+
+/* ClipboardManager Messages */
+"Image uploaded successfully" = "图片上传成功";
+"Image upload failed, using local path" = "图片上传失败，使用本地路径";
+
+/* Image Preview Tip */
+"Hold ⌘ Command key to preview images" = "按住 ⌘ Command 键可预览图片";
+
+/* Preview Search Bar */
+"Previous" = "上一个";
+"Next" = "下一个";
+"Done" = "完成";
+"Replace" = "替换";
+"Replace All" = "全部替换";
+
+/* Toolbar Tooltips */
+"Format" = "排版";
+"Presentation" = "演示";
+"Toggle Note List" = "列表";
+"Toggle Split Mode" = "分栏";
+
+/* Export Messages */
+"Exporting..." = "正在导出";
+"Export failed" = "导出失败";
+"System version too low" = "系统版本过低";
+"Enter title" = "输入标题";
+"Save Failed" = "保存失败";
+"Critical Error" = "严重错误";
+"Failed to initialize main window. Please restart the application." = "初始化主窗口失败，请重启应用。";
+"Delete Images" = "删除图片";
+"Restore Images" = "还原图片";
+"Quit" = "退出";
+"Formatting... click again to cancel" = "正在排版...再次点击可取消";
+
+/* Always On Top */
+"Window stays on top" = "窗口已置顶";
+"Window normal mode" = "窗口正常模式";
+
+/* Menu Items */
+"Always On Top" = "窗口置顶";
+"Pin Note" = "置顶笔记";
+
+/* File Operations */
+"Duplicate note name" = "笔记名称重复";
+"Note \"%@\" already exists" = "笔记 \"%@\" 已存在";
+"Please select default storage directory" = "请选择默认存储目录";
+"Select Markdown files or folders to import" = "选择要导入的 Markdown 文件或文件夹";
+"No importable Markdown files found~" = "没有找到可导入的 Markdown 文件~";
+"Could not use this folder" = "无法使用这个文件夹";
+"Selected storage folder is not a folder." = "所选存储位置不是文件夹。";
+"Nextpage cannot read this folder. If this is a cloud drive, open the provider app and make sure the folder is exposed in Finder." = "Nextpage无法读取这个文件夹。如果这是云盘目录，请打开云盘应用，确认该文件夹已在访达中可见。";
+"Nextpage cannot write to this folder. Choose a writable folder or enable offline access in the cloud drive app." = "Nextpage无法写入这个文件夹。请选择可写文件夹，或在云盘应用中开启离线访问。";
+
+/* Reload Note */
+"Reload Note" = "重新加载";
+"You have unsaved changes. Reload will discard them." = "你有未保存的更改，重新加载将丢弃它们。";
+"Reload" = "重新加载";
+"Note reloaded~" = "笔记已刷新~";
+"Font size: %d" = "字体大小：%d";
+
+/* Version History */
+"Version History" = "版本历史";
+"Current Version" = "当前版本";
+"Restore to This Version" = "恢复到此版本";
+"Restored to version from %@" = "已恢复到 %@ 的版本";
+"No Version History" = "暂无历史版本";
+"Versions are saved automatically every 5 minutes while editing" = "编辑时每 5 分钟自动保存一个版本";
+"Words" = "字数";
+"Modified" = "修改";
+"Created" = "创建";
+"Backlinks" = "反向链接";
+"Project name" = "文件夹名称";
+"Recommended" = "推荐";
+"All Fonts" = "全部字体";
+"Not installed" = "未安装";
+"Install the font first" = "需要先安装字体";
+"Nextpage uses this font by default but no longer bundles it. Double-click the downloaded file to install it, and Nextpage switches to it on its own. Personal non-commercial use is free; commercial work needs a licence from Tsanger." = "Nextpage默认用这个字体，但不再内置，下载后双击文件安装，装好之后会自动换上，个人非商业使用免费，商用需要向仓耳单独购买授权。";
+"Download Font" = "下载字体";
+"Chinese" = "中文";
+"Latin" = "西文";
+"Same as Text" = "跟随正文";
+"Prompt" = "提示词";
+"Global Prompt" = "全局提示词";
+"Prompt Scope" = "提示词范围";
+"Global" = "全局";
+"Current Journal" = "当前日记";
+"Prompt Settings…" = "提示词设置…";
+"Prompt saved" = "提示词已保存";
+"Could not save prompt" = "无法保存提示词";
+"Choose a journal folder before editing prompts." = "编辑提示词前请选择日记文件夹。";
+"Saved at config/prompt.md" = "已保存到 config/prompt.md";
+"Saved as prompt.md in the current journal" = "已保存为当前日记中的 prompt.md";
+"Reload" = "重新加载";

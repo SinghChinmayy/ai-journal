@@ -1,0 +1,115 @@
+included:
+  - .
+
+excluded:
+  - .build
+  - .vscode
+
+disabled_rules:
+  - force_cast
+  - force_try
+  - function_body_length
+  - nesting
+  - todo
+  - type_body_length
+  - type_name
+  - identifier_name
+  - opening_brace
+  - trailing_comma
+  - private_action
+  - private_outlet
+  - void_function_in_ternary
+  # SwiftUI's .sheet(isPresented:onDismiss:content:) and similar APIs
+  # are idiomatic with a labeled closure followed by a trailing closure;
+  # firing on it is noise, not a bug.
+  - multiple_closures_with_trailing_closure
+
+opt_in_rules:
+  - empty_count
+  - first_where
+  - shorthand_operator
+  - cyclomatic_complexity
+  - redundant_nil_coalescing
+  - contains_over_filter_count
+  - contains_over_filter_is_empty
+  - contains_over_first_not_nil
+  - empty_collection_literal
+  - sorted_first_last
+  - toggle_bool
+  - unavailable_function
+  - yoda_condition
+  - redundant_string_enum_value
+
+analyzer_rules:
+  - unused_import
+  - unused_declaration
+
+line_length:
+  warning: 240
+  error: 300
+  ignores_function_declarations: true
+  ignores_comments: true
+  ignores_interpolated_strings: true
+  ignores_urls: true
+
+cyclomatic_complexity:
+  warning: 22
+  error: 24
+
+file_length:
+  warning: 2000
+  error: 2500
+
+function_parameter_count:
+  warning: 5
+  error: 8
+
+large_tuple:
+  warning: 2
+  error: 3
+
+custom_rules:
+  no_direct_singleton_in_new_code:
+    name: "Prefer AppEnvironment over raw singletons"
+    regex: '\b(?:Storage\.sharedInstance\(\)|Storage\.instance|WikilinkIndex\.shared|CloudSyncManager\.shared|NoteVersionManager\.shared|UserDataService\.instance|ViewController\.shared\(\))'
+    match_kinds:
+      - identifier
+    message: "Use AppEnvironment.current.<service> for new code. Existing call sites are grandfathered; do not add new ones."
+    severity: warning
+    # Grandfathered call sites as of the AppEnvironment introduction. Remove
+    # files from this list as their singleton usage migrates to AppEnvironment.
+    # Do NOT add new files here; the warning is the point.
+    excluded:
+      - "Business/AppEnvironment.swift"
+      - "Business/HtmlManager.swift"
+      - "Business/Note.swift"
+      - "Business/PrefsModel.swift"
+      - "Business/Sidebar.swift"
+      - "Business/Storage.swift"
+      - "Business/Types.swift"
+      - "Controllers/AppDelegate.swift"
+      - "Controllers/AppDelegate\\+URLRoutes.swift"
+      - "Controllers/ContentViewController.swift"
+      - "Controllers/EditorPrefsViewController.swift"
+      - "Controllers/GeneralPrefsViewController.swift"
+      - "Controllers/MainWindowController.swift"
+      - "Controllers/ProjectSettingsViewController.swift"
+      - "Controllers/TypographyPrefsViewController.swift"
+      - "Controllers/VersionHistoryViewController.swift"
+      - "Controllers/ViewController.swift"
+      - "Controllers/ViewController\\+Action.swift"
+      - "Controllers/ViewController\\+Data.swift"
+      - "Controllers/ViewController\\+Editor.swift"
+      - "Extensions/MPreviewView\\+Export.swift"
+      - "Extensions/NSTextStorage\\+.swift"
+      - "Helpers/EditorMenuManager.swift"
+      - "Helpers/FileSystemEventManager.swift"
+      - "Helpers/NotesTextProcessor.swift"
+      - "Helpers/TextFormatter.swift"
+      - "Views/EditTextView.swift"
+      - "Views/MPreviewView.swift"
+      - "Views/NotesTableView.swift"
+      - "Views/SidebarProjectView.swift"
+      # Tests are an explicit access boundary; using the singleton directly is
+      # fine. Tests must restore any shared preferences they change.
+      - "DaybookTests"

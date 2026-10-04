@@ -1,0 +1,1402 @@
+import Cocoa
+import CoreServices
+import Foundation
+import UniformTypeIdentifiers
+
+enum PromptScope: Equatable {
+    case global
+    case journal(Project)
+}
+
+/// Owns the portable prompt files while keeping their paths and persistence
+/// rules out of the editor and storage callers.
+struct PromptStore {
+    static let promptFileName = "prompt.md"
+    static let configurationDirectoryName = "config"
+
+    let storageRoot: URL
+
+    init(storageRoot: URL) {
+        self.storageRoot = storageRoot.resolvingSymlinksInPath()
+    }
+
+    func url(for scope: PromptScope) -> URL {
+        switch scope {
+        case .global:
+            storageRoot
+                .appendingPathComponent(Self.configurationDirectoryName, isDirectory: true)
+                .appendingPathComponent(Self.promptFileName, isDirectory: false)
+        case .journal(let project):
+            project.url.appendingPathComponent(Self.promptFileName, isDirectory: false)
+        }
+    }
+
+    func prompt(for scope: PromptScope) throws -> String {
+        let promptURL = url(for: scope)
+        guard FileManager.default.fileExists(atPath: promptURL.path) else {
+            return ""
+        }
+        return try String(contentsOf: promptURL, encoding: .utf8)
+    }
+
+    func save(_ prompt: String, scope: PromptScope) throws {
+        let promptURL = url(for: scope)
+        let fileManager = FileManager.default
+
+        guard !prompt.isEmpty else {
+            if fileManager.fileExists(atPath: promptURL.path) {
+                try fileManager.removeItem(at: promptURL)
+            }
+            return
+        }
+
+        try fileManager.createDirectory(
+            at: promptURL.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        try Data(prompt.utf8).write(to: promptURL, options: .atomic)
+    }
+
+    func effectivePrompt(for project: Project) throws -> String {
+        [
+            try prompt(for: .global),
+            try prompt(for: .journal(project)),
+        ]
+        .filter { !$0.isEmpty }
+        .joined(separator: "\n\n")
+    }
+
+    static func isReservedPromptFile(_ url: URL) -> Bool {
+        url.lastPathComponent.caseInsensitiveCompare(promptFileName) == .orderedSame
+    }
+
+    static func isReservedConfigurationDirectory(_ url: URL) -> Bool {
+        url.lastPathComponent.caseInsensitiveCompare(configurationDirectoryName) == .orderedSame
+    }
+}
+
+struct DirectoryItem {
+    let url: URL
+    let modificationDate: Date
+    let creationDate: Date
+}
+
+@MainActor
+class Storage {
+    static var instance: Storage?
+
+    var noteList = [Note]()
+    private var projects = [Project]()
+    private var imageFolders = [URL]()
+
+    public var tagNames = [String]()
+    public var tags = [String]()
+
+    var notesDict: [String: Note] = [:]
+
+    private struct LoadedProjectInfo {
+        let lastScan: Date
+        let contentModifiedAt: Date?
+        let hadError: Bool
+    }
+
+    private var loadedProjectInfo: [String: LoadedProjectInfo] = [:]
+
+    var allowedExtensions = [
+        "md", "markdown",
+    ]
+    private static let attachmentDirectoryNames = ["i", "files"]
+
+    var pinned: Int = 0
+
+    private var bookmarks = [URL]()
+    private var scopedURLs = [URL]()
+
+    init() {
+        guard var url = UserDefaultsManagement.storageUrl else {
+            return
+        }
+
+        startAccessingSecurityScopedResourceIfNeeded(url, bookmarkData: UserDefaultsManagement.storageBookmark)
+
+        if UserDefaultsManagement.isSingleMode, let singleModeUrl = UserDefaultsManagement.singleModeURL {
+            let singleModeScopeURL = UserDefaultsManagement.singleModeScopeURL ?? singleModeUrl
+            let singleModeScopeBookmark = UserDefaultsManagement.singleModeAccessBookmark ?? UserDefaultsManagement.singleModeBookmark
+
+            startAccessingSecurityScopedResourceIfNeeded(singleModeScopeURL, bookmarkData: singleModeScopeBookmark)
+            if !FileManager.default.directoryExists(atUrl: singleModeUrl) {
+                url = singleModeUrl.deletingLastPathComponent()
+            } else {
+                url = singleModeUrl
+            }
+        }
+
+        var name = url.lastPathComponent
+
+        if let iCloudURL = getCloudDrive(), iCloudURL == url {
+            name = "iCloud Drive"
+        }
+
+        let project = Project(url: url, label: name, isRoot: true, isDefault: true)
+
+        _ = add(project: project)
+
+        checkTrashForVolume(url: project.url)
+
+        for url in bookmarks {
+            if url.pathExtension == "css" {
+                continue
+            }
+
+            guard !projectExist(url: url) else {
+                continue
+            }
+
+            let project = Project(url: url, label: url.lastPathComponent, isRoot: true)
+            _ = add(project: project)
+        }
+    }
+
+    public func getChildProjects(project: Project) -> [Project] {
+        projects.filter {
+            $0.parent == project
+        }
+        .sorted(by: { $0.label.localizedCaseInsensitiveCompare($1.label) == .orderedAscending })
+    }
+
+    public func getRootProject() -> Project? {
+        projects.first(where: { $0.isRoot })
+    }
+
+    public func getDefault() -> Project? {
+        projects.first(where: { $0.isDefault })
+    }
+
+    public func getRootProjects() -> [Project] {
+        projects.filter(\.isRoot).sorted(by: { $0.label.localizedCaseInsensitiveCompare($1.label) == .orderedAscending })
+    }
+
+    public func getDefaultTrash() -> Project? {
+        projects.first(where: { $0.isTrash })
+    }
+
+    private func checkSub(url: URL, parent: Project) -> [Project] {
+        var added = [Project]()
+        let parentPath = url.path + "/i/"
+        let filesPath = url.path + "/files/"
+
+        if let subFolders = getSubFolders(url: url) {
+            for subFolder in subFolders {
+                if subFolder.lastPathComponent == "i" {
+                    imageFolders.append(subFolder as URL)
+                    continue
+                }
+
+                if projects.count > 100 {
+                    return added
+                }
+
+                let subUrl = subFolder as URL
+
+                guard !projectExist(url: subUrl),
+                    subUrl.lastPathComponent != "i",
+                    subUrl.lastPathComponent != "files",
+                    !subUrl.path.contains(".Trash"),
+                    !subUrl.path.contains("Trash"),
+                    !subUrl.path.contains("/."),
+                    !subUrl.path.contains(parentPath),
+                    !subUrl.path.contains(filesPath),
+                    true
+                else {
+                    continue
+                }
+                let project = Project(url: subUrl, label: subUrl.lastPathComponent, parent: parent)
+                projects.append(project)
+                added.append(project)
+            }
+        }
+
+        return added
+    }
+
+    private func checkTrashForVolume(url: URL) {
+        if UserDefaultsManagement.isSingleMode {
+            return
+        }
+
+        var trashURL = getTrash(url: url)
+        var needsTrashCreation = true
+
+        if let currentTrash = trashURL, FileManager.default.fileExists(atPath: currentTrash.path) {
+            needsTrashCreation = false
+        }
+
+        if needsTrashCreation {
+            guard let trash = getDefault()?.url.appendingPathComponent("Trash") else {
+                return
+            }
+
+            var isDir = ObjCBool(false)
+            if !FileManager.default.fileExists(atPath: trash.path, isDirectory: &isDir) || !isDir.boolValue {
+                do {
+                    try FileManager.default.createDirectory(at: trash, withIntermediateDirectories: false, attributes: nil)
+                } catch {
+                    AppDelegate.trackError(error, context: "Storage.trashDir")
+                }
+            }
+
+            trashURL = trash
+        }
+
+        if let trashURL = trashURL {
+            guard !projectExist(url: trashURL) else {
+                return
+            }
+
+            let project = Project(url: trashURL, isTrash: true)
+            projects.append(project)
+        }
+    }
+
+    private func getCloudDrive() -> URL? {
+        if let iCloudDocumentsURL = FileManager.default.url(forUbiquityContainerIdentifier: nil)?.appendingPathComponent("Documents").resolvingSymlinksInPath() {
+            var isDirectory = ObjCBool(true)
+            if FileManager.default.fileExists(atPath: iCloudDocumentsURL.path, isDirectory: &isDirectory), isDirectory.boolValue {
+                return iCloudDocumentsURL
+            }
+        }
+
+        return nil
+    }
+
+    func projectExist(url: URL) -> Bool {
+        projects.contains(where: { $0.url == url })
+    }
+
+    public func removeBy(project: Project) {
+        let list = noteList.filter {
+            $0.project == project
+        }
+
+        for note in list {
+            if let i = noteList.firstIndex(where: { $0 === note }) {
+                noteList.remove(at: i)
+            }
+        }
+
+        if let i = projects.firstIndex(of: project) {
+            projects.remove(at: i)
+        }
+        loadedProjectInfo.removeValue(forKey: project.url.path)
+    }
+
+    public func add(project: Project) -> [Project] {
+        var added = [Project]()
+
+        if !projects.contains(project) {
+            projects.append(project)
+            added.append(project)
+        }
+
+        let shouldScanSubProjects: Bool
+        if project.isRoot {
+            if UserDefaultsManagement.isSingleMode, let singleModeUrl = UserDefaultsManagement.singleModeURL {
+                shouldScanSubProjects =
+                    FileManager.default.directoryExists(atUrl: singleModeUrl)
+                    && project.url == singleModeUrl
+            } else {
+                shouldScanSubProjects = true
+            }
+        } else {
+            shouldScanSubProjects = false
+        }
+
+        if shouldScanSubProjects {
+            let addedSubProjects = checkSub(url: project.url, parent: project)
+            added += addedSubProjects
+        }
+
+        return added
+    }
+
+    private func startAccessingSecurityScopedResourceIfNeeded(_ url: URL, bookmarkData: Data?) {
+        guard bookmarkData != nil else {
+            return
+        }
+
+        if url.startAccessingSecurityScopedResource() {
+            scopedURLs.append(url)
+        }
+    }
+
+    func getTrash(url: URL) -> URL? {
+        return try? FileManager.default.url(for: .trashDirectory, in: .allDomainsMask, appropriateFor: url, create: false)
+    }
+
+    static func isSystemTrashProject(_ project: Project) -> Bool {
+        guard project.isTrash,
+            let systemTrash = try? FileManager.default.url(
+                for: .trashDirectory,
+                in: .allDomainsMask,
+                appropriateFor: project.url,
+                create: false)
+        else { return false }
+
+        return systemTrash.resolvingSymlinksInPath().standardizedFileURL
+            == project.url.resolvingSymlinksInPath().standardizedFileURL
+    }
+
+    static func shouldHideRemovedTrashItem(at url: URL, in project: Project) -> Bool {
+        project.isTrash
+            && (try? url.extendedAttribute(forName: AppIdentifier.removedFromTrashKey)) != nil
+    }
+
+    public func getBookmarks() -> [URL] {
+        bookmarks
+    }
+
+    public static func sharedInstance() -> Storage {
+        guard let storage = instance else {
+            instance = Storage()
+            return instance!
+        }
+        return storage
+    }
+
+    public func loadProjects(withTrash: Bool = false, skipRoot: Bool = false) {
+        if !skipRoot {
+            noteList.removeAll()
+            loadedProjectInfo.removeAll()
+        }
+
+        let singleModeRootProject: Project? = {
+            guard UserDefaultsManagement.isSingleMode,
+                let singleModeURL = UserDefaultsManagement.singleModeURL,
+                FileManager.default.directoryExists(atUrl: singleModeURL)
+            else {
+                return nil
+            }
+            return getRootProject()
+        }()
+
+        for project in projects {
+            if project.isTrash, !withTrash {
+                continue
+            }
+
+            if project.isRoot, skipRoot {
+                continue
+            }
+            if let singleModeRootProject, project.isDescendant(of: singleModeRootProject) {
+                loadLabel(project)
+                continue
+            }
+            if UserDefaultsManagement.isSingleMode, let singleModeUrl = UserDefaultsManagement.singleModeURL {
+                let singleRootUrl = singleModeUrl.deletingLastPathComponent()
+                if project.url == singleModeUrl {
+                    loadLabel(project)
+                }
+                if project.url == singleRootUrl {
+                    loadLabel(project)
+                }
+            } else {
+                loadLabel(project)
+            }
+        }
+    }
+
+    public func reconfigureForSingleMode(originalFileURL: URL? = nil, siblingFiles: [URL]? = nil) {
+        guard UserDefaultsManagement.isSingleMode,
+            let singleModeUrl = UserDefaultsManagement.singleModeURL
+        else {
+            return
+        }
+
+        for url in scopedURLs {
+            url.stopAccessingSecurityScopedResource()
+        }
+        scopedURLs.removeAll()
+
+        let singleModeScopeURL = UserDefaultsManagement.singleModeScopeURL ?? singleModeUrl
+        let singleModeScopeBookmark = UserDefaultsManagement.singleModeAccessBookmark ?? UserDefaultsManagement.singleModeBookmark
+        startAccessingSecurityScopedResourceIfNeeded(singleModeScopeURL, bookmarkData: singleModeScopeBookmark)
+
+        let rootUrl: URL
+        if FileManager.default.directoryExists(atUrl: singleModeUrl) {
+            rootUrl = singleModeUrl
+        } else {
+            rootUrl = singleModeUrl.deletingLastPathComponent()
+        }
+
+        projects.removeAll()
+        noteList.removeAll()
+        loadedProjectInfo.removeAll()
+        pinned = 0
+
+        var name = rootUrl.lastPathComponent
+        if let iCloudURL = getCloudDrive(), iCloudURL == rootUrl {
+            name = "iCloud Drive"
+        }
+        let project = Project(url: rootUrl, label: name, isRoot: true, isDefault: true)
+        _ = add(project: project)
+        loadProjects()
+
+        // Sandbox fallback: in App Store builds the sandbox extension from
+        // application:open: may not persist to the deferred directory enumeration
+        // in loadLabel. Use the pre-enumerated sibling files to populate the list
+        // so ALL .md files in the directory are visible, not just the opened one.
+        if noteList.isEmpty, let files = siblingFiles, !files.isEmpty {
+            for fileURL in files {
+                let resolved = fileURL.resolvingSymlinksInPath()
+                guard FileManager.default.fileExists(atPath: resolved.path),
+                    !PromptStore.isReservedPromptFile(resolved),
+                    !FileManager.default.directoryExists(atUrl: resolved)
+                else { continue }
+                let note = Note(url: resolved, with: project)
+                note.loadMetadataFromDisk()
+                noteList.append(note)
+            }
+        } else if noteList.isEmpty, let fileURL = originalFileURL {
+            // Final fallback: just the opened file
+            let resolved = fileURL.resolvingSymlinksInPath()
+            if FileManager.default.fileExists(atPath: resolved.path),
+                !PromptStore.isReservedPromptFile(resolved),
+                !FileManager.default.directoryExists(atUrl: resolved)
+            {
+                let note = Note(url: resolved, with: project)
+                note.loadMetadataFromDisk()
+                noteList.append(note)
+            }
+        }
+    }
+
+    func loadDocuments(tryCount: Int = 0, completion: @escaping () -> Void) {
+        _ = restoreCloudPins()
+
+        noteList = sortNotes(noteList: noteList, filter: "")
+
+        guard !checkFirstRun() else {
+            if tryCount == 0 {
+                loadProjects()
+                loadDocuments(tryCount: 1) {}
+                return
+            }
+            return
+        }
+    }
+
+    public func getMainProject() -> Project {
+        projects.first!
+    }
+
+    public func getProjects() -> [Project] {
+        projects
+    }
+
+    public func getProjectBy(element: Int) -> Project? {
+        if projects.indices.contains(element) {
+            return projects[element]
+        }
+
+        return nil
+    }
+
+    public func getCloudDriveProjects() -> [Project] {
+        projects.filter {
+            $0.isCloudDrive == true
+        }
+    }
+
+    public func getLocalProjects() -> [Project] {
+        projects.filter {
+            $0.isCloudDrive == false
+        }
+    }
+
+    public func getProjectPaths() -> [String] {
+        var pathList: [String] = []
+        let projects = getProjects()
+
+        for project in projects {
+            pathList.append(NSString(string: project.url.path).expandingTildeInPath)
+        }
+
+        return pathList
+    }
+
+    public func getProjectBy(url: URL) -> Project? {
+        let projectURL = url.deletingLastPathComponent()
+        let path = projectURL.path
+
+        // Find all projects that could be parents (prefix match)
+        let candidates = projects.filter { project in
+            let projectPath = project.url.path
+            if path == projectPath {
+                return true
+            }
+            let normalized = projectPath.hasSuffix("/") ? projectPath : projectPath + "/"
+            return path.hasPrefix(normalized)
+        }
+
+        // Return the one with the longest path (most specific match)
+        return candidates.max(by: { $0.url.path.count < $1.url.path.count })
+    }
+
+    func sortNotes(noteList: [Note], filter: String, project: Project? = nil, operation: Operation? = nil) -> [Note] {
+        let hasFilter = !filter.isEmpty
+
+        return noteList.sorted(by: {
+            if let operation = operation, operation.isCancelled {
+                return false
+            }
+
+            if hasFilter {
+                let firstMatch = $0.title.range(of: filter, options: [.caseInsensitive, .anchored]) != nil
+                if firstMatch {
+                    let secondMatch = $1.title.range(of: filter, options: [.caseInsensitive, .anchored]) != nil
+                    if secondMatch {
+                        return sortQuery(note: $0, next: $1, project: project)
+                    }
+                    return true
+                }
+            }
+
+            return sortQuery(note: $0, next: $1, project: project)
+        })
+    }
+
+    private func sortQuery(note: Note, next: Note, project: Project?) -> Bool {
+        let sortDirection: SortDirection = UserDefaultsManagement.sortDirection ? .desc : .asc
+
+        let sort = UserDefaultsManagement.sort
+
+        if note.isPinned == next.isPinned {
+            switch sort {
+            case .creationDate:
+                if let prevDate = note.creationDate, let nextDate = next.creationDate {
+                    return sortDirection == .asc && prevDate < nextDate || sortDirection == .desc && prevDate > nextDate
+                }
+            case .modificationDate, .none:
+                return sortDirection == .asc && note.modifiedLocalAt < next.modifiedLocalAt || sortDirection == .desc && note.modifiedLocalAt > next.modifiedLocalAt
+            case .title:
+                let result = note.title.localizedCaseInsensitiveCompare(next.title)
+                return sortDirection == .asc && result == .orderedAscending || sortDirection == .desc && result == .orderedDescending
+            }
+        }
+
+        return note.isPinned && !next.isPinned
+    }
+
+    func loadLabel(_ item: Project, loadContent: Bool = false) {
+        let result = readDirectoryWithStatus(item.url)
+        let documents = result.items
+        let contentModifiedAt = directoryContentModifiedAt(item.url)
+
+        for document in documents {
+            let url = document.url
+
+            guard !Self.shouldHideRemovedTrashItem(at: url, in: item) else { continue }
+
+            if let currentNoteURL = EditTextView.note?.url,
+                currentNoteURL.resolvingSymlinksInPath().path == url.resolvingSymlinksInPath().path
+            {
+                // Re-use the existing Note object so the currently open file
+                // stays visible in the list after a single-mode reload.
+                if let existingNote = EditTextView.note {
+                    if existingNote.isPinned {
+                        pinned += 1
+                    }
+                    noteList.append(existingNote)
+                }
+                continue
+            }
+
+            let note = Note(url: url.resolvingSymlinksInPath(), with: item)
+
+            if url.pathComponents.isEmpty {
+                continue
+            }
+
+            note.modifiedLocalAt = document.modificationDate
+            note.creationDate = document.creationDate
+            note.project = item
+
+            let pinData =
+                (try? note.url.extendedAttribute(forName: AppIdentifier.pinKey))
+                ?? (try? note.url.extendedAttribute(forName: AppIdentifier.legacyPinKey))
+            if let data = pinData {
+                let isPinned = data.withUnsafeBytes { (ptr: UnsafeRawBufferPointer) -> Bool in
+                    ptr.load(as: Bool.self)
+                }
+
+                note.isPinned = isPinned
+            }
+
+            if loadContent {
+                note.load()
+            }
+
+            if note.isPinned {
+                pinned += 1
+            }
+
+            noteList.append(note)
+        }
+        loadedProjectInfo[item.url.path] = LoadedProjectInfo(
+            lastScan: Date(),
+            contentModifiedAt: contentModifiedAt,
+            hadError: result.hadError
+        )
+    }
+
+    public func loadMissingNotes(for project: Project) {
+        let projectPath = project.url.path
+        let now = Date()
+        let contentModifiedAt = directoryContentModifiedAt(project.url)
+
+        if let info = loadedProjectInfo[projectPath] {
+            if !info.hadError {
+                if project.isCloudDrive {
+                    if now.timeIntervalSince(info.lastScan) < 2.0 {
+                        return
+                    }
+                } else {
+                    if let contentModifiedAt = contentModifiedAt,
+                        contentModifiedAt == info.contentModifiedAt
+                    {
+                        return
+                    }
+
+                    if contentModifiedAt == nil,
+                        now.timeIntervalSince(info.lastScan) < 1.0
+                    {
+                        return
+                    }
+                }
+            } else if now.timeIntervalSince(info.lastScan) < 2.0 {
+                return
+            }
+        }
+
+        let result = readDirectoryWithStatus(project.url)
+        let documents = result.items
+
+        for document in documents {
+            let url = document.url
+
+            guard !Self.shouldHideRemovedTrashItem(at: url, in: project) else { continue }
+
+            // Check if note is already loaded to avoid duplicates
+            if noteList.contains(where: { $0.url == url }) {
+                continue
+            }
+
+            let note = Note(url: url.resolvingSymlinksInPath(), with: project)
+
+            if url.pathComponents.isEmpty {
+                continue
+            }
+
+            note.modifiedLocalAt = document.modificationDate
+            note.creationDate = document.creationDate
+            note.project = project
+
+            let pinData =
+                (try? note.url.extendedAttribute(forName: AppIdentifier.pinKey))
+                ?? (try? note.url.extendedAttribute(forName: AppIdentifier.legacyPinKey))
+            if let data = pinData {
+                let isPinned = data.withUnsafeBytes { (ptr: UnsafeRawBufferPointer) -> Bool in
+                    ptr.load(as: Bool.self)
+                }
+                note.isPinned = isPinned
+            }
+
+            if note.isPinned {
+                pinned += 1
+            }
+
+            noteList.append(note)
+        }
+        loadedProjectInfo[projectPath] = LoadedProjectInfo(
+            lastScan: now,
+            contentModifiedAt: contentModifiedAt,
+            hadError: result.hadError
+        )
+    }
+
+    public func unload(project: Project) {
+        let notes = noteList.filter { $0.project == project }
+        for note in notes {
+            if let i = noteList.firstIndex(where: { $0 === note }) {
+                noteList.remove(at: i)
+            }
+        }
+        loadedProjectInfo.removeValue(forKey: project.url.path)
+    }
+
+    public func reLoadTrash() {
+        noteList.removeAll(where: { $0.isTrash() })
+
+        for project in projects where project.isTrash {
+            loadLabel(project, loadContent: true)
+        }
+    }
+
+    /// Reconcile a Trash project before presenting it. FSEvents can coalesce
+    /// or delay a removal from the system Trash, so the in-memory list may
+    /// still contain a Note whose file is already gone. Retiring the old
+    /// object closes every late-save path before it is removed from storage.
+    func retireMissingNotes(in project: Project) {
+        let missingNotes = noteList.filter {
+            $0.project == project
+                && (!FileManager.default.fileExists(atPath: $0.url.path)
+                    || Self.shouldHideRemovedTrashItem(at: $0.url, in: project))
+        }
+        for note in missingNotes {
+            note.retireAfterRemoval()
+            removeBy(note: note)
+        }
+    }
+
+    private func directoryContentModifiedAt(_ url: URL) -> Date? {
+        (try? url.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate
+    }
+
+    private struct DirectoryReadResult {
+        let items: [DirectoryItem]
+        let hadError: Bool
+    }
+
+    private func readDirectoryWithStatus(_ url: URL) -> DirectoryReadResult {
+        let url = url.resolvingSymlinksInPath()
+
+        do {
+            let directoryFiles =
+                try FileManager.default.contentsOfDirectory(at: url, includingPropertiesForKeys: [.contentModificationDateKey, .creationDateKey, .typeIdentifierKey], options: .skipsHiddenFiles)
+
+            let items =
+                directoryFiles.filter {
+                    allowedExtensions.contains($0.pathExtension.lowercased())
+                        && !PromptStore.isReservedPromptFile($0)
+                        && isValidUTI(url: $0)
+                }
+                .map { url in
+                    DirectoryItem(
+                        url: url,
+                        modificationDate: (try? url.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate ?? Date.distantPast,
+                        creationDate: (try? url.resourceValues(forKeys: [.creationDateKey]))?.creationDate ?? Date.distantPast
+                    )
+                }
+            return DirectoryReadResult(items: items, hadError: false)
+        } catch {
+            AppDelegate.trackError(error, context: "Storage.notFound: \(url.path)")
+        }
+
+        return DirectoryReadResult(items: [], hadError: true)
+    }
+
+    public func readDirectory(_ url: URL) -> [DirectoryItem] {
+        readDirectoryWithStatus(url).items
+    }
+
+    public func isValidUTI(url: URL) -> Bool {
+        guard url.fileSize < 100_000_000 else {
+            return false
+        }
+
+        guard let typeIdentifier = (try? url.resourceValues(forKeys: [.typeIdentifierKey]))?.typeIdentifier else {
+            return false
+        }
+
+        guard let utType = UTType(typeIdentifier) else {
+            return false
+        }
+
+        if utType.conforms(to: .directory) {
+            return false
+        }
+
+        return utType.conforms(to: .text)
+            || utType.conforms(to: .plainText)
+            || typeIdentifier == "net.daringfireball.markdown"
+            || typeIdentifier == "public.markdown"
+    }
+
+    func add(_ note: Note) {
+        if !noteList.contains(where: { $0.name == note.name && $0.project == note.project }) {
+            noteList.append(note)
+        }
+    }
+
+    func removeBy(note: Note) {
+        if let i = noteList.firstIndex(where: { $0 === note }) {
+            noteList.remove(at: i)
+        }
+    }
+
+    func getNextId() -> Int {
+        noteList.count
+    }
+
+    /// Pure decision for whether an empty journal needs its welcome note.
+    /// Keeping this separate makes the first-run behavior regression-testable
+    /// without creating a full application session.
+    enum InitContentDecision: Equatable {
+        case skip  // already initialized; nothing to do
+        case markInitialized  // user has notes; just record the flag
+        case createInitFolders  // empty noteList + flag unset; seed demo
+    }
+
+    static func decideInitContent(noteListIsEmpty: Bool, hasCreatedInitContent: Bool) -> InitContentDecision {
+        if !noteListIsEmpty { return .markInitialized }
+        if hasCreatedInitContent { return .skip }
+        return .createInitFolders
+    }
+
+    func checkFirstRun() -> Bool {
+        switch Storage.decideInitContent(
+            noteListIsEmpty: noteList.isEmpty,
+            hasCreatedInitContent: UserDefaultsManagement.hasCreatedInitContent
+        ) {
+        case .markInitialized:
+            UserDefaultsManagement.hasCreatedInitContent = true
+            return false
+        case .skip:
+            return false
+        case .createInitFolders:
+            break
+        }
+
+        guard let destination = getDemoSubdirURL() else {
+            return false
+        }
+
+        if UserDefaultsManagement.isSingleMode {
+            return true
+        }
+
+        let welcomeURL = destination.appendingPathComponent("Welcome.md")
+        let welcome = """
+            # Welcome to Nextpage
+
+            Nextpage keeps your writing as Markdown files in the folder you selected.
+
+            - Create a note with `⌘N`.
+            - Rename the selected note with `⌘R`.
+            - Toggle rendered preview with `⌘3`.
+            - Delete a note with `⌘⌫`; it remains recoverable from Trash.
+
+            ## Today
+
+            - [ ] Write your first journal entry
+            """
+
+        do {
+            if !FileManager.default.fileExists(atPath: welcomeURL.path) {
+                try welcome.write(to: welcomeURL, atomically: true, encoding: .utf8)
+            }
+            if let note = initNote(url: welcomeURL) {
+                note.load()
+                add(note)
+            }
+        } catch {
+            AppDelegate.trackError(error, context: "Storage.initialSetup")
+            return false
+        }
+
+        UserDefaultsManagement.hasCreatedInitContent = true
+        return true
+    }
+
+    func getBy(url: URL) -> Note? {
+        if noteList.isEmpty {
+            return nil
+        }
+
+        let resolvedPath = url.resolvingSymlinksInPath().path.lowercased()
+
+        return
+            noteList.first(where: {
+                $0.url.resolvingSymlinksInPath().path.lowercased() == resolvedPath
+            })
+    }
+
+    func getBy(name: String) -> Note? {
+        noteList.first(where: {
+            $0.name == name
+
+        })
+    }
+
+    func getBy(title: String) -> Note? {
+        noteList.first(where: {
+            $0.title.lowercased() == title.lowercased()
+
+        })
+    }
+
+    func getBy(startWith: String) -> [Note]? {
+        noteList.filter {
+            $0.title.starts(with: startWith)
+        }
+    }
+
+    func getDemoSubdirURL() -> URL? {
+        if let project = projects.first {
+            return project.url
+        }
+
+        return nil
+    }
+
+    func removeNotes(
+        notes: [Note],
+        fsRemove: Bool = true,
+        completely: Bool = false,
+        partialFailure: ((Int) -> Void)? = nil,
+        didRemove: (([Note]) -> Void)? = nil,
+        completion: @escaping ([URL: URL]?) -> Void
+    ) {
+        guard !notes.isEmpty else {
+            completion(nil)
+            return
+        }
+
+        // Run the file IO first. If the trash / move fails for a note, keep
+        // it in the in-memory list and the sidebar so the user does not see
+        // it disappear from the UI while the file is still on disk. Without
+        // this ordering a denied permission, full Trash, or iCloud stall
+        // would silently make the note vanish from Nextpage but persist as
+        // an orphan file.
+        var removed = [URL: URL]()
+        var succeeded = [Note]()
+        var failedCount = 0
+
+        for note in notes {
+            if !fsRemove {
+                succeeded.append(note)
+                continue
+            }
+
+            // Preserve the latest editor bytes in the recoverable Trash copy.
+            // The watcher path skips this because its file is already gone;
+            // flushing there would recreate the externally removed note.
+            guard note.flushPendingSave(globalStorage: false) else {
+                failedCount += 1
+                continue
+            }
+
+            let originalPath = note.url.path
+            if let removal = note.removeFile(completely: completely) {
+                if case .moved(let destination, let original) = removal {
+                    removed[destination] = original
+                }
+                succeeded.append(note)
+            } else if !FileManager.default.fileExists(atPath: originalPath) {
+                // removeFile returned nil because the file was already gone.
+                // Treat as success so the empty row does not linger.
+                succeeded.append(note)
+            } else {
+                failedCount += 1
+            }
+        }
+
+        for note in succeeded {
+            note.retireAfterRemoval()
+            removeBy(note: note)
+        }
+        didRemove?(succeeded)
+
+        if failedCount > 0 {
+            let warning = NSError(
+                domain: "com.chinmay.nextpage.delete",
+                code: 1,
+                userInfo: [NSLocalizedDescriptionKey: "removeNotes: \(failedCount) of \(notes.count) failed"])
+            AppDelegate.trackError(warning, context: "Storage.removeNotes.partialFailure")
+            partialFailure?(failedCount)
+        }
+
+        if !removed.isEmpty {
+            completion(removed)
+        } else {
+            completion(nil)
+        }
+    }
+
+    func getSubFolders(url: URL) -> [NSURL]? {
+        let keys: [URLResourceKey] = [.isDirectoryKey, .isPackageKey, .isHiddenKey, .isSymbolicLinkKey]
+        let options: FileManager.DirectoryEnumerationOptions = [.skipsHiddenFiles, .skipsPackageDescendants, .skipsSubdirectoryDescendants]
+
+        guard let fileEnumerator = FileManager.default.enumerator(at: url, includingPropertiesForKeys: keys, options: options) else {
+            return nil
+        }
+
+        var extensions = allowedExtensions
+        // Common image and file extensions to skip as "folders"
+        for ext in ["jpg", "png", "gif", "jpeg", "json", "JPG", "PNG", ".icloud"] {
+            extensions.append(ext)
+        }
+        // Specific folder names to skip
+        let skipFolders = Set(["assets", ".cache", "i", ".Trash", "files", PromptStore.configurationDirectoryName])
+
+        var subDirs = [NSURL]()
+
+        for case let fileURL as URL in fileEnumerator {
+            // Skip check for extensions (optimization: check extension first as it's faster)
+            if extensions.contains(fileURL.pathExtension.lowercased()) { continue }
+
+            // Skip check for specific folder names
+            if skipFolders.contains(fileURL.lastPathComponent) { continue }
+
+            do {
+                let resourceValues = try fileURL.resourceValues(forKeys: Set(keys))
+
+                // Symlinks first: .isDirectoryKey follows the link, so a directory-symlink
+                // would otherwise be appended twice.
+                if resourceValues.isSymbolicLink ?? false {
+                    let resolved = fileURL.resolvingSymlinksInPath()
+                    var isDir: ObjCBool = false
+                    if FileManager.default.fileExists(atPath: resolved.path, isDirectory: &isDir),
+                        isDir.boolValue,
+                        let resolvedValues = try? resolved.resourceValues(forKeys: [.isPackageKey]),
+                        !(resolvedValues.isPackage ?? true)
+                    {
+                        if isAttachmentOnlyFolder(url: resolved) { continue }
+                        subDirs.append(fileURL as NSURL)
+                    }
+                    continue
+                }
+
+                if let isDirectory = resourceValues.isDirectory, isDirectory,
+                    let isPackage = resourceValues.isPackage, !isPackage
+                {
+                    if isAttachmentOnlyFolder(url: fileURL) { continue }
+                    subDirs.append(fileURL as NSURL)
+                }
+            } catch {
+                continue
+            }
+        }
+
+        return subDirs
+    }
+
+    /// True when `url` is a leaf folder that holds only attachment-style files:
+    /// at least one file, no note file (md/markdown/txt), and no subfolder. Such
+    /// folders (an `images` / `videos` dir of inline media, regardless of name)
+    /// carry nothing to navigate to, so the sidebar hides them. Empty folders and
+    /// folders that contain notes or subfolders return false, so a freshly created
+    /// folder still appears. Immediate children only, no recursion, so a large
+    /// media dir costs one shallow read and symlink loops are impossible.
+    func isAttachmentOnlyFolder(url: URL) -> Bool {
+        let keys: [URLResourceKey] = [.isDirectoryKey, .isPackageKey]
+        let options: FileManager.DirectoryEnumerationOptions = [.skipsHiddenFiles, .skipsPackageDescendants, .skipsSubdirectoryDescendants]
+        guard let enumerator = FileManager.default.enumerator(at: url, includingPropertiesForKeys: keys, options: options) else {
+            return false
+        }
+
+        var hasFile = false
+        for case let fileURL as URL in enumerator {
+            let values = try? fileURL.resourceValues(forKeys: Set(keys))
+            // A subfolder means this is a structural folder, not a leaf media dump.
+            if values?.isDirectory == true { return false }
+            // A note file means there is something to navigate to; keep it.
+            if allowedExtensions.contains(fileURL.pathExtension.lowercased()) { return false }
+            hasFile = true
+        }
+
+        return hasFile
+    }
+
+    public func getCurrentProject() -> Project? {
+        projects.first
+    }
+
+    public func getAllTrash() -> [Note] {
+        noteList.filter {
+            $0.isTrash()
+        }
+    }
+
+    public func initiateCloudDriveSync() {
+        for project in projects {
+            syncDirectory(url: project.url)
+        }
+
+        for imageFolder in imageFolders {
+            syncDirectory(url: imageFolder)
+        }
+    }
+
+    public func syncDirectory(url: URL) {
+        do {
+            let directoryFiles =
+                try FileManager.default.contentsOfDirectory(at: url, includingPropertiesForKeys: [.contentModificationDateKey, .creationDateKey])
+
+            let files =
+                directoryFiles.filter {
+                    !isDownloaded(url: $0)
+                }
+
+            let images = files.map { url in
+                (
+                    url,
+                    (try? url.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate ?? Date.distantPast,
+                    (try? url.resourceValues(forKeys: [.creationDateKey]))?.creationDate ?? Date.distantPast
+                )
+            }
+
+            for image in images {
+                let url = image.0 as URL
+
+                if FileManager.default.isUbiquitousItem(at: url) {
+                    try? FileManager.default.startDownloadingUbiquitousItem(at: url)
+                }
+            }
+        } catch {
+        }
+    }
+
+    public func findOrphanAttachments(completion: @escaping @MainActor ([URL]) -> Void) {
+        let referenced = collectReferencedAttachmentPaths()
+        let attachmentFolders = collectAttachmentFolders()
+
+        DispatchQueue.global(qos: .userInitiated).async {
+            let orphaned = Storage.scanOrphanAttachments(folders: attachmentFolders, referenced: referenced)
+
+            DispatchQueue.main.async {
+                completion(orphaned)
+            }
+        }
+    }
+
+    private func collectAttachmentFolders() -> [URL] {
+        var folders = [URL]()
+        let manager = FileManager.default
+
+        for project in projects where !project.isTrash {
+            for folderName in Storage.attachmentDirectoryNames {
+                let folderURL = project.url.appendingPathComponent(folderName)
+                var isDir = ObjCBool(false)
+
+                if manager.fileExists(atPath: folderURL.path, isDirectory: &isDir), isDir.boolValue {
+                    folders.append(folderURL)
+                }
+            }
+        }
+
+        return folders
+    }
+
+    nonisolated private static func scanOrphanAttachments(folders: [URL], referenced: Set<String>) -> [URL] {
+        var orphaned = [URL]()
+        let manager = FileManager.default
+
+        for folderURL in folders {
+            guard let enumerator = manager.enumerator(at: folderURL, includingPropertiesForKeys: [.isDirectoryKey], options: [.skipsHiddenFiles]) else {
+                continue
+            }
+
+            for case let fileURL as URL in enumerator {
+                if shouldSkipAttachmentCandidate(fileURL) {
+                    continue
+                }
+
+                if !referenced.contains(fileURL.path) {
+                    orphaned.append(fileURL)
+                }
+            }
+        }
+
+        return orphaned
+    }
+
+    public func removeAttachments(urls: [URL]) -> (removed: [URL], failed: [URL]) {
+        var removed = [URL]()
+        var failed = [URL]()
+        let manager = FileManager.default
+
+        for url in urls {
+            do {
+                var resultingItemUrl: NSURL?
+                try manager.trashItem(at: url, resultingItemURL: &resultingItemUrl)
+                removed.append(url)
+            } catch {
+                do {
+                    try manager.removeItem(at: url)
+                    removed.append(url)
+                } catch {
+                    failed.append(url)
+                    AppDelegate.trackError(error, context: "Storage.cleanOrphanAttachments")
+                }
+            }
+        }
+
+        return (removed, failed)
+    }
+
+    private func collectReferencedAttachmentPaths() -> Set<String> {
+        var referenced = Set<String>()
+
+        for note in noteList {
+            referenced.formUnion(note.getReferencedAttachmentPaths())
+        }
+
+        return referenced
+    }
+
+    nonisolated private static func shouldSkipAttachmentCandidate(_ url: URL) -> Bool {
+        var isDirectory = ObjCBool(false)
+        if FileManager.default.fileExists(atPath: url.path, isDirectory: &isDirectory), isDirectory.boolValue {
+            return true
+        }
+
+        let name = url.lastPathComponent
+        if name.hasPrefix(".") || name.hasSuffix(".icloud") {
+            return true
+        }
+
+        return false
+    }
+
+    public func isDownloaded(url: URL) -> Bool {
+        var isDownloaded: AnyObject?
+
+        do {
+            try (url as NSURL).getResourceValue(&isDownloaded, forKey: URLResourceKey.ubiquitousItemDownloadingStatusKey)
+        } catch _ {}
+
+        if isDownloaded as? URLUbiquitousItemDownloadingStatus == URLUbiquitousItemDownloadingStatus.current {
+            return true
+        }
+
+        return false
+    }
+
+    public func initNote(url: URL) -> Note? {
+        guard let project = getProjectBy(url: url) else {
+            return nil
+        }
+
+        guard !Self.shouldHideRemovedTrashItem(at: url, in: project) else {
+            return nil
+        }
+
+        let note = Note(url: url, with: project)
+
+        return note
+    }
+
+    private func cleanTrash() {
+        guard let trash = try? FileManager.default.url(for: .trashDirectory, in: .allDomainsMask, appropriateFor: UserDefaultsManagement.storageUrl, create: false) else {
+            return
+        }
+
+        do {
+            let fileURLs = try FileManager.default.contentsOfDirectory(at: trash, includingPropertiesForKeys: nil, options: [])
+
+            for fileURL in fileURLs {
+                try FileManager.default.removeItem(at: fileURL)
+            }
+        } catch {
+            AppDelegate.trackError(error, context: "Storage.copyPins")
+        }
+    }
+
+    public func saveCloudPins() {
+    }
+
+    public func restoreCloudPins() -> (removed: [Note]?, added: [Note]?) {
+        return (nil, nil)
+    }
+
+    public func getPinned() -> [Note]? {
+        noteList.filter(\.isPinned)
+    }
+
+    public func remove(project: Project) {
+        if let index = projects.firstIndex(of: project) {
+            projects.remove(at: index)
+        }
+    }
+
+    public func getNotesBy(project: Project) -> [Note] {
+        noteList.filter {
+            $0.project == project
+        }
+    }
+
+    /// Flush every note with unpersisted content synchronously.
+    /// Called from lifecycle hooks (applicationWillTerminate, windowWillClose,
+    /// windowDidResignKey) and explicit Cmd+S so the 1.5s debounce window
+    /// cannot eat user edits.
+    ///
+    /// The .filter() pass produces a snapshot array up front so we never
+    /// iterate `noteList` directly. flushPendingSave -> executeSave can
+    /// trigger storage.add(self) (line ~603, when globalStorage=true), which
+    /// mutates noteList. Iterating the original would crash with the
+    /// "modified during iteration" trap on a hot path that the user feels.
+    @discardableResult
+    public func flushPendingSaves() -> Bool {
+        let dirtyNotes = noteList.filter(\.needsSave)
+        var allSucceeded = true
+        for note in dirtyNotes where !note.flushPendingSave() {
+            allSucceeded = false
+        }
+        return allSucceeded
+    }
+
+    public func loadProjects(from urls: [URL]) {
+        var result = [URL]()
+        for url in urls {
+            do {
+                _ = try FileManager.default.contentsOfDirectory(atPath: url.path)
+                result.append(url)
+            } catch {
+                AppDelegate.trackError(error, context: "Storage.enumerateNotes")
+            }
+        }
+
+        let projects =
+            result.compactMap {
+                Project(url: $0)
+            }
+
+        guard !projects.isEmpty else {
+            return
+        }
+
+        self.projects.removeAll()
+
+        for project in projects {
+            self.projects.append(project)
+        }
+    }
+
+    public func trashItem(url: URL) -> URL? {
+        guard let trashURL = Storage.sharedInstance().getDefaultTrash()?.url else {
+            return nil
+        }
+
+        let fileName = url.deletingPathExtension().lastPathComponent
+        let fileExtension = url.pathExtension
+
+        var destination = trashURL.appendingPathComponent(url.lastPathComponent)
+
+        var i = 0
+
+        while FileManager.default.fileExists(atPath: destination.path) {
+            let nextName = "\(fileName)_\(i).\(fileExtension)"
+            destination = trashURL.appendingPathComponent(nextName)
+            i += 1
+        }
+
+        return destination
+    }
+
+    deinit {
+        for url in scopedURLs {
+            url.stopAccessingSecurityScopedResource()
+        }
+    }
+}

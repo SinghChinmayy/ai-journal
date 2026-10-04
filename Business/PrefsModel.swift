@@ -1,0 +1,157 @@
+import Foundation
+
+typealias PreferencesCategory = PrefsSection
+
+// MARK: - Preferences Category Model
+enum PrefsSection: CaseIterable, Sendable {
+    case general, editor, typography, prompt
+
+    @MainActor
+    var title: String {
+        switch self {
+        case .general: return I18n.str("General")
+        case .editor: return I18n.str("Editor")
+        case .typography: return I18n.str("Fonts")
+        case .prompt: return I18n.str("Global Prompt")
+        }
+    }
+
+    var systemSymbolName: String {
+        switch self {
+        case .general: return "paintbrush"
+        case .editor: return "square.and.pencil"
+        case .typography: return "textformat.size"
+        case .prompt: return "text.bubble"
+        }
+    }
+
+    var iconAssetName: String? {
+        switch self {
+        case .general: return "icon_interface"
+        case .editor: return "icon_experience"
+        case .typography: return "icon_typography"
+        case .prompt: return nil
+        }
+    }
+}
+
+// MARK: - Settings Configuration Protocol
+@MainActor
+protocol SettingsConfigurable {
+    var category: PreferencesCategory { get }
+    var title: String { get }
+
+    func applyChanges()
+}
+
+// MARK: - General Settings Model
+@MainActor
+struct GeneralSettings: SettingsConfigurable {
+    let category: PreferencesCategory = .general
+    let title: String = I18n.str("Interface")
+
+    var appearanceType: AppearanceType {
+        get { UserDefaultsManagement.appearanceType }
+        set { UserDefaultsManagement.appearanceType = newValue }
+    }
+
+    var defaultLanguage: Int {
+        get { UserDefaultsManagement.defaultLanguage }
+        set { UserDefaultsManagement.defaultLanguage = newValue }
+    }
+
+    var storagePath: String? {
+        get { UserDefaultsManagement.storagePath }
+        set { UserDefaultsManagement.storagePath = newValue }
+    }
+
+    var buttonShow: String {
+        get { UserDefaultsManagement.buttonShow }
+        set { UserDefaultsManagement.buttonShow = newValue }
+    }
+
+    var defaultPicUpload: String {
+        get { UserDefaultsManagement.defaultPicUpload }
+        set { UserDefaultsManagement.defaultPicUpload = newValue }
+    }
+
+    func applyChanges() {
+        NotificationCenter.default.post(name: .preferencesChanged, object: self.category)
+    }
+}
+
+// MARK: - Editor Settings Model
+@MainActor
+struct EditorSettings: SettingsConfigurable {
+    let category: PreferencesCategory = .editor
+    let title: String = I18n.str("Experience")
+
+    var editorFontName: String {
+        get { UserDefaultsManagement.fontName }
+        set { UserDefaultsManagement.fontName = newValue }
+    }
+
+    var editorFontSize: Int {
+        get { UserDefaultsManagement.fontSize }
+        set { UserDefaultsManagement.fontSize = newValue }
+    }
+
+    var windowFontName: String {
+        get { UserDefaultsManagement.windowFontName }
+        set { UserDefaultsManagement.windowFontName = newValue }
+    }
+
+    var previewFontName: String {
+        get { UserDefaultsManagement.previewFontName }
+        set { UserDefaultsManagement.previewFontName = newValue }
+    }
+
+    var previewFontSize: Int {
+        get { UserDefaultsManagement.previewFontSize }
+        set { UserDefaultsManagement.previewFontSize = newValue }
+    }
+
+    var presentationFontSize: Int {
+        get { UserDefaultsManagement.presentationFontSize }
+        set { UserDefaultsManagement.presentationFontSize = newValue }
+    }
+
+    var codeFontName: String {
+        get { UserDefaultsManagement.codeFontName }
+        set { UserDefaultsManagement.codeFontName = newValue }
+    }
+
+    var editorLineBreak: String {
+        get { UserDefaultsManagement.editorLineBreak }
+        set { UserDefaultsManagement.editorLineBreak = newValue }
+    }
+
+    var previewLocation: String {
+        get { UserDefaultsManagement.previewLocation }
+        set { UserDefaultsManagement.previewLocation = newValue }
+    }
+
+    var previewWidth: String {
+        get { UserDefaultsManagement.previewWidth }
+        set { UserDefaultsManagement.previewWidth = newValue }
+    }
+
+    func applyChanges() {
+        guard let vc = ViewController.shared() else { return }
+        NotesTextProcessor.hl = nil
+        NotesTextProcessor.refreshFonts()
+
+        let wasPreviewOn = UserDefaultsManagement.preview
+        if wasPreviewOn {
+            vc.disablePreview()
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { [weak vc] in
+                vc?.refillEditArea(force: true)
+                if let vc, !vc.isNextpagePPT(needToast: false) {
+                    vc.enablePreview()
+                }
+            }
+        } else {
+            vc.refillEditArea(force: true)
+        }
+    }
+}

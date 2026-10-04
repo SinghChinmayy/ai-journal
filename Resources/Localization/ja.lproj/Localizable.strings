@@ -1,0 +1,324 @@
+/* About Window */
+"About" = "Nextpageについて";
+
+/* No comment provided by engineer. */
+"Add" = "追加";
+
+/* No comment provided by engineer. */
+"Are you sure you want to move %d note(s) to the system Trash?" = "%d件のメモをシステムのゴミ箱に移動しますか？";
+
+/* No comment provided by engineer. */
+"Are you sure you want to remove project \"%@\" and all files inside?" = "フォルダ\"%@\"と中の全てファイルを削除してもよろしいですか?";
+
+/* Delete menu */
+"Cancel" = "キャンセル";
+
+/* No comment provided by engineer. */
+"Copy HTML" = "HTMLをコピー";
+
+/* No comment provided by engineer. */
+"Copy Link" = "リンクをコピー";
+
+/* No comment provided by engineer. */
+"Copy Plain Text" = "プレーンテキストをコピー";
+
+/* No comment provided by engineer. */
+"Delete" = "削除";
+
+/* No comment provided by engineer. */
+"Delete Folder" = "フォルダを削除";
+
+
+/* No comment provided by engineer. */
+"Nextpage [preview]" = "Nextpageを「プレビュー」";
+
+/* No comment provided by engineer. */
+"Link" = "リンク";
+
+/* Menu */
+"Move" = "移動";
+
+/* Menu */
+"Export" = "輸出";
+
+/* 設定 - セクション */
+"Appearance & Language" = "外観と言語";
+"Interface & Upload" = "インターフェースとアップロード";
+"Storage Location" = "保存場所";
+"Note Location" = "ノート保存先";
+"Interface" = "インターフェース";
+"Experience" = "体験";
+"Typography" = "タイポグラフィ";
+
+/* 設定 - ラベル */
+"Appearance" = "外観";
+"Language" = "言語";
+"Change" = "変更";
+"General" = "一般";
+"Editor" = "エディタ";
+"Fonts" = "フォント";
+"Editor Behavior" = "エディタの動作";
+"Preview" = "プレビュー";
+"Editor Font:" = "編集フォント:";
+"Preview Font:" = "プレビューフォント:";
+"Interface Font:" = "インターフェースフォント:";
+"Code Font:" = "コードフォント:";
+"Presentation Font Size:" = "プレゼンサイズ:";
+"Preview Location:" = "プレビュー位置:";
+"Preview Width:" = "プレビュー幅:";
+"Editor Mode:" = "エディタモード:";
+"Split Mode" = "分割モード";
+"Pure Editing" = "純粋編集";
+"Appearance:" = "外観色:";
+"Language:" = "インターフェース言語:";
+"Button Display:" = "ボタン表示:";
+"Always On Top:" = "常に最前面:";
+"Activate Shortcut:" = "ショートカット起動:";
+"Yes" = "はい";
+"No" = "いいえ";
+
+/* 設定 - オプション */
+"System" = "システム";
+"Light" = "ライト";
+"Dark" = "ダーク";
+"Always" = "常に";
+"On Hover" = "ホバー時";
+"Never" = "しない";
+"Image Upload" = "画像アップロード";
+"Upload Service:" = "アップロードサービス:";
+"None" = "なし";
+
+/* エディタ設定 - オプション */
+"Begin" = "先頭";
+"End" = "末尾";
+"Right" = "右";
+"Bottom" = "下";
+"Editing" = "編集";
+"Full Width" = "全幅";
+"Line Break:" = "改行:";
+"Nextpage" = "Nextpage";
+"Auto" = "自動";
+
+/* No comment provided by engineer. */
+"New" = "新規作成";
+
+/* No comment provided by engineer. */
+"New Folder" = "新規フォルダ";
+
+/* No comment provided by engineer. */
+"New Subfolder" = "新規サブフォルダ";
+
+/* No comment provided by engineer. */
+"New project" = "新規フォルダ";
+
+/* Sidebar label */
+"Notes" = "Nextpage";
+
+/* No comment provided by engineer. */
+"OK" = "はい";
+
+/* Edit area */
+"Please enter image title:" = "画像のタイトルを入力してください：";
+
+/* No comment provided by engineer. */
+"Please enter project name:" = "プロジェクト名を入力してください：";
+
+/* No comment provided by engineer. */
+"Please try again" = "もう一度お試しください";
+
+/* No comment provided by engineer. */
+"Preferences" = "環境設定";
+
+/* No comment provided by engineer. */
+"Quit Nextpage" = "Nextpageを終了する";
+
+/* Delete menu */
+"Remove" = "削除";
+
+/* No comment provided by engineer. */
+"Move to Trash" = "ゴミ箱に移動";
+
+/* No comment provided by engineer. */
+"Rename Folder" = "フォルダの名前を変更";
+
+/* No comment provided by engineer. */
+"Show in Finder" = "Finderに表示";
+"Open in Terminal" = "ターミナルで開く";
+
+/* View menu */
+"Sort by" = "並び替え";
+
+/* No comment provided by engineer. */
+"Strikethrough" = "取り消し線";
+
+/* Delete menu */
+"The note(s) will be moved to the system Trash and can be recovered." = "メモはシステムのゴミ箱に移動され、後で復元できます。";
+
+/* Delete menu */
+"This action cannot be undone." = "この操作は元に戻せません。宜しいでしょうか？";
+
+/* No comment provided by engineer. */
+"Toggle Preview" = "プレビューを切り替え";
+
+/* Sidebar label */
+"Trash" = "削除";
+
+/* No comment provided by engineer. */
+"Underline" = "アンダーライン";
+
+/* Untitled Note */
+"Untitled Note" = "名称未設定";
+
+/* No comment provided by engineer. */
+"URL has been copied to clipboard" = "URLがクリップボードにコピーされました。";
+
+/* Menu */
+"View" = "表示";
+
+"Search" = "検索";
+
+
+
+
+"%d Nextpage" = "%d つNextpage";
+
+"PDF export failed, please try again~" = "PDFエクスポートに失敗しました。もう一度お試しください。";
+
+/* Toast messages without emoji prefix */
+"Automatic typesetting succeeded~" = "自動組版完了しました。";
+"Typography cleaned up~" = "組版をクリーンアップしました。";
+"Typography is already clean~" = "組版はすでにきれいです。";
+"Press ESC key to exit~" = "ESC キーを押して終了します。";
+"Format is only possible after exiting preview mode~" = "フォーマットの為に、プレビューモードを終了してください。";
+"Saved to Downloads folder~" = "ダウンロードフォルダに保存されました。";
+"Saved~" = "保存しました。";
+"Click the title again to rename~" = "タイトル未保存。タイトルをもう一度クリックしてから編集してください。";
+"External change detected. Local copy backed up~" = "外部からの変更を検出しました。ローカルの内容をバックアップしました。";
+"Switching notes is disabled during export~" = "エクスポート中はノートを切り替えできません。";
+"Failed to move %d note(s) to Trash~" = "%d 件のノートをゴミ箱に移動できませんでした。";
+"Image upload in progress~" = "画像アップロード中~";
+"Image upload failed, Use local~" = "画像のアップロードに失敗しました。ローカルを使用してください";
+"Please make sure your Mac is installed %@ ~" = "Macに %@ をインストールされていることを確認してください。";
+"In single open mode, Exit with Command+Shift+W ~" = "シングルモードでは、Command+Shift+W で終了します";
+"Please make sure your title exists~" = "タイトルが既にあることを確認してください";
+"Found that there are multiple titles of this~" = "複数のタイトルが見つかりました、検索を利用ください。";
+"URL is successfully copied, Use it anywhere~" = "URLがコピーされました。ご利用ください。";
+"Path is successfully copied~" = "パスがコピーされました。";
+"No delimiter --- identification, Cannot use Nextpage PPT~" = "区切り「---」がなければ、Nextpage PPT使えません。";
+"Formatting failed, please try again" = "フォーマットに失敗しました。もう一度お試しください";
+"Formatting cancelled" = "フォーマットをキャンセルしました";
+
+"This %@ under this folder already exists!" = "このフォルダの下に %@ は既に存在します";
+"Please change the title" = "タイトルを変更してください。";
+
+"Edit Link…" = "リンクを編集";
+"Remove Link" = "リンクを削除";
+
+"Restart to Nextpage to take effect" = "Nextpageを再起動して有効にします。";
+"Confirm" = "確認";
+
+/* Font Names */
+
+/* ClipboardManager Messages */
+"Image uploaded successfully" = "画像のアップロードが成功しました";
+"Image upload failed, using local path" = "画像のアップロードに失敗しました、ローカルパスを使用します";
+
+/* Image Preview Tip */
+"Hold ⌘ Command key to preview images" = "⌘ Command キーを押しながら画像をプレビュー";
+
+/* Missing translations */
+"Preview Settings" = "プレビュー設定";
+"Code Background:" = "コード背景:";
+"Github" = "Github";
+
+/* Preview Search Bar */
+"Previous" = "前へ";
+"Next" = "次へ";
+"Done" = "完了";
+"Replace" = "置換";
+"Replace All" = "すべて置換";
+
+/* Clean attachments */
+"Clean Orphan Attachments" = "未使用の添付ファイルを整理";
+"Detected %d unused attachment(s). Move them to Trash?" = "%d件の未使用の添付ファイルが見つかりました。ゴミ箱に移動しますか？";
+"No orphan attachments found" = "未使用の添付ファイルは見つかりませんでした";
+"Removed %d unused attachment(s)" = "%d件の未使用の添付ファイルを削除しました";
+"Some attachments could not be removed" = "一部の添付ファイルを削除できませんでした";
+"Clean" = "整理";
+
+/* Export Messages */
+"Exporting..." = "エクスポート中";
+"Export failed" = "エクスポートに失敗しました";
+"System version too low" = "システムバージョンが低すぎます";
+"Enter title" = "タイトルを入力";
+"Save Failed" = "保存に失敗しました";
+"Critical Error" = "重大なエラー";
+"Failed to initialize main window. Please restart the application." = "メインウィンドウの初期化に失敗しました。アプリを再起動してください。";
+"Delete Images" = "画像を削除";
+"Restore Images" = "画像を復元";
+"Quit" = "終了";
+"Formatting... click again to cancel" = "整形中...もう一度クリックでキャンセル";
+"Format" = "整形";
+"Presentation" = "プレゼン";
+"Toggle Note List" = "リスト";
+"Toggle Split Mode" = "分割";
+
+/* Always On Top */
+"Window stays on top" = "ウィンドウを最前面に固定";
+"Window normal mode" = "ウィンドウ通常モード";
+
+/* Menu Items */
+"Always On Top" = "常に最前面に表示";
+"Pin Note" = "ノートをピン留め";
+
+/* File Operations */
+"Duplicate note name" = "ノート名が重複しています";
+"Note \"%@\" already exists" = "ノート \"%@\" は既に存在します";
+"Please select default storage directory" = "デフォルトの保存先ディレクトリを選択してください";
+"Select Markdown files or folders to import" = "読み込む Markdown ファイルまたはフォルダを選択してください";
+"No importable Markdown files found~" = "読み込める Markdown ファイルが見つかりませんでした。";
+"Could not use this folder" = "このフォルダを使用できません";
+"Selected storage folder is not a folder." = "選択した保存先はフォルダではありません。";
+"Nextpage cannot read this folder. If this is a cloud drive, open the provider app and make sure the folder is exposed in Finder." = "Nextpage はこのフォルダを読み取れません。クラウドドライブの場合は、提供元アプリを開き、Finder にフォルダが表示されていることを確認してください。";
+"Nextpage cannot write to this folder. Choose a writable folder or enable offline access in the cloud drive app." = "Nextpage はこのフォルダに書き込めません。書き込み可能なフォルダを選ぶか、クラウドドライブアプリでオフラインアクセスを有効にしてください。";
+
+/* Reload Note */
+"Reload Note" = "再読み込み";
+"You have unsaved changes. Reload will discard them." = "未保存の変更があります。再読み込みすると破棄されます。";
+"Reload" = "再読み込み";
+"Note reloaded~" = "ノートを再読み込みしました~";
+"Font size: %d" = "文字サイズ：%d";
+
+/* Version History */
+"Version History" = "バージョン履歴";
+"Current Version" = "現在のバージョン";
+"Restore to This Version" = "このバージョンに復元";
+"Restored to version from %@" = "%@ のバージョンに復元しました";
+"No Version History" = "バージョン履歴はありません";
+"Versions are saved automatically every 5 minutes while editing" = "編集中は5分ごとに自動保存されます";
+"Words" = "文字数";
+"Modified" = "更新";
+"Created" = "作成";
+"Backlinks" = "バックリンク";
+"Project name" = "フォルダ名";
+"Recommended" = "おすすめ";
+"All Fonts" = "すべてのフォント";
+"Not installed" = "未インストール";
+"Install the font first" = "先にフォントをインストールしてください";
+"Nextpage uses this font by default but no longer bundles it. Double-click the downloaded file to install it, and Nextpage switches to it on its own. Personal non-commercial use is free; commercial work needs a licence from Tsanger." = "Nextpage はこのフォントを既定にしていますが同梱はしていません。ダウンロードしたファイルをダブルクリックしてインストールすると、自動で切り替わります。個人の非商用利用は無償、商用利用には倉耳のライセンスが必要です。";
+"Download Font" = "フォントをダウンロード";
+"Chinese" = "中国語";
+"Latin" = "欧文";
+"Same as Text" = "本文と同じ";
+"Prompt" = "プロンプト";
+"Global Prompt" = "グローバルプロンプト";
+"Prompt Scope" = "プロンプトの範囲";
+"Global" = "グローバル";
+"Current Journal" = "現在のジャーナル";
+"Prompt Settings…" = "プロンプト設定…";
+"Prompt saved" = "プロンプトを保存しました";
+"Could not save prompt" = "プロンプトを保存できませんでした";
+"Choose a journal folder before editing prompts." = "プロンプトを編集する前にジャーナルフォルダを選択してください。";
+"Saved at config/prompt.md" = "config/prompt.md に保存されています";
+"Saved as prompt.md in the current journal" = "現在のジャーナルの prompt.md として保存されています";
+"Reload" = "再読み込み";

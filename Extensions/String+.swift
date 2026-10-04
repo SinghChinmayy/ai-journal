@@ -1,0 +1,161 @@
+import CommonCrypto
+import CoreServices
+import CryptoKit
+import Foundation
+
+extension String {
+    // Shared regex cache to avoid recompilation overhead
+    nonisolated(unsafe) private static let regexCache = NSCache<NSString, NSRegularExpression>()
+
+    private func getCachedRegex(pattern: String, options: NSRegularExpression.Options = []) -> NSRegularExpression? {
+        let key = "\(pattern)-\(options.rawValue)" as NSString
+        if let cached = String.regexCache.object(forKey: key) {
+            return cached
+        }
+
+        if let regex = try? NSRegularExpression(pattern: pattern, options: options) {
+            String.regexCache.setObject(regex, forKey: key)
+            return regex
+        }
+        return nil
+    }
+
+    public func condenseWhitespace() -> String {
+        components(separatedBy: .whitespacesAndNewlines)
+            .filter { !$0.isEmpty }
+            .joined(separator: " ")
+    }
+
+    public func localizedStandardContains<S: StringProtocol>(_ terms: [S]) -> Bool {
+        terms.contains { localizedStandardContains($0) }
+    }
+
+    public func trim() -> String {
+        trimmingCharacters(in: .whitespaces)
+    }
+
+    public func getPrefixMatchSequentially(char: String) -> String? {
+        var result = String()
+
+        for current in self {
+            guard current.description == char else { break }
+            result += char
+        }
+
+        return result.isEmpty ? nil : result
+    }
+
+    public func localizedCaseInsensitiveContainsTerms(_ terms: [Substring]) -> Bool {
+        terms.allSatisfy { localizedLowercase.contains($0) }
+    }
+
+    public func removeLastNewLine() -> String {
+        last == "\n" ? String(dropLast()) : self
+    }
+
+    public func isNumberList() -> Bool {
+        let pattern = "^(( |\t)*[0-9]+\\. )"
+        guard let regex = getCachedRegex(pattern: pattern) else { return false }
+        return regex.firstMatch(in: self, options: [], range: NSRange(location: 0, length: count)) != nil
+    }
+
+    public var isValidUUID: Bool {
+        UUID(uuidString: self) != nil
+    }
+
+    public func escapePlus() -> String {
+        replacingOccurrences(of: "+", with: "%20")
+    }
+
+    public func tag(withClass: CFString) -> String? {
+        UTTypeCopyPreferredTagWithClass(self as CFString, withClass)?.takeRetainedValue() as String?
+    }
+
+    public func uti(withClass: CFString) -> String? {
+        UTTypeCreatePreferredIdentifierForTag(withClass, self as CFString, nil)?.takeRetainedValue() as String?
+    }
+
+    public var utiMimeType: String? {
+        tag(withClass: kUTTagClassMIMEType)
+    }
+
+    public var utiFileExtension: String? {
+        tag(withClass: kUTTagClassFilenameExtension)
+    }
+
+    public var mimeTypeUTI: String? {
+        uti(withClass: kUTTagClassMIMEType)
+    }
+
+    public var fileExtensionUTI: String? {
+        uti(withClass: kUTTagClassFilenameExtension)
+    }
+
+    public var md5: String {
+        let data = Data(self.utf8)
+        let hash = Insecure.MD5.hash(data: data)
+        return hash.map { String(format: "%02hhx", $0) }.joined()
+    }
+
+    public var isNumber: Bool {
+        !isEmpty && rangeOfCharacter(from: CharacterSet.decimalDigits.inverted) == nil
+    }
+}
+
+extension StringProtocol where Index == String.Index {
+    public func nsRange(from range: Range<Index>) -> NSRange {
+        NSRange(range, in: self)
+    }
+}
+
+// MARK: - String Subscript Extensions
+extension String {
+    // Single character access by integer index
+    // PERF: O(n) complexity. Use valid String.Index for performance critical code.
+    public subscript(value: Int) -> Character {
+        self[index(at: value)]
+    }
+
+    // Substring access by NSRange
+    public subscript(value: NSRange) -> Substring {
+        self[value.lowerBound..<value.upperBound]
+    }
+
+    // Substring access by closed range
+    // PERF: O(n) complexity for index calculation.
+    public subscript(value: CountableClosedRange<Int>) -> Substring {
+        self[index(at: value.lowerBound)...index(at: value.upperBound)]
+    }
+
+    public subscript(value: CountableRange<Int>) -> Substring {
+        self[index(at: value.lowerBound)..<index(at: value.upperBound)]
+    }
+
+    public subscript(value: PartialRangeUpTo<Int>) -> Substring {
+        self[..<index(at: value.upperBound)]
+    }
+
+    public subscript(value: PartialRangeThrough<Int>) -> Substring {
+        self[...index(at: value.upperBound)]
+    }
+
+    public subscript(value: PartialRangeFrom<Int>) -> Substring {
+        self[index(at: value.lowerBound)...]
+    }
+
+    // Helper method to convert integer offset to String.Index
+    fileprivate func index(at offset: Int) -> String.Index {
+        self.index(startIndex, offsetBy: offset)
+    }
+}
+
+extension NSString {
+    public func getLineRangeBefore(_ lineRange: NSRange) -> NSRange? {
+        var lineStart = 0
+        getLineStart(&lineStart, end: nil, contentsEnd: nil, for: lineRange)
+        if lineStart == 0 {
+            return nil
+        }
+        return self.lineRange(for: NSRange(location: lineStart - 1, length: 0))
+    }
+}

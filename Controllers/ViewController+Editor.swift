@@ -1,0 +1,1607 @@
+import Cocoa
+import Foundation
+import Prettier
+import PrettierMarkdown
+
+struct MarkdownFormatOutput: Sendable {
+    let protectedContent: String
+    let placeholders: [String: String]
+    let formattedString: String
+    let cursorOffset: Int
+}
+
+actor MarkdownFormatWorker {
+    private var formatter: PrettierFormatter?
+
+    private func getFormatter() -> PrettierFormatter {
+        if let formatter {
+            return formatter
+        }
+
+        let formatter = PrettierFormatter(plugins: [MarkdownPlugin()], parser: MarkdownParser())
+        formatter.htmlWhitespaceSensitivity = HTMLWhitespaceSensitivityStrategy.ignore
+        formatter.proseWrap = ProseWrapStrategy.preserve
+        formatter.prepare()
+        self.formatter = formatter
+        return formatter
+    }
+
+    func format(content: String, cursor: Int) throws -> MarkdownFormatOutput {
+        if Task.isCancelled {
+            throw CancellationError()
+        }
+
+        let (protectedContent, placeholders) = HtmlManager.protectHTMLTags(in: content)
+        let adjustedCursor = HtmlManager.adjustCursorForProtectedContent(cursor: cursor, original: content, protected: protectedContent)
+        let result = getFormatter().format(protectedContent, withCursorAtLocation: adjustedCursor)
+
+        if Task.isCancelled {
+            throw CancellationError()
+        }
+
+        switch result {
+        case .success(let formatResult):
+            return MarkdownFormatOutput(
+                protectedContent: protectedContent,
+                placeholders: placeholders,
+                formattedString: formatResult.formattedString,
+                cursorOffset: formatResult.cursorOffset
+            )
+        case .failure(let error):
+            throw error
+        }
+    }
+}
+
+// MARK: - Editor Management
+extension ViewController {
+    // MARK: - Timing Constants
+
+    private enum EditorTiming {
+        static let scrollSyncResetDelay: TimeInterval = 0.016  // ~60fps (1/60 second)
+        // Toast nudges and the small "press ESC" prompt after entering
+        // Presentation / Magic PPT. Not on a layout-critical path; keep
+        // the fixed delay so the toast appears slightly after the mode
+        // visually settles rather than overlapping it.
+        static let presentationLayoutDelay: TimeInterval = 0.15
+        // Split-view scroll sync coalesce window. WebKit fires its scroll
+        // events on a ~60fps cadence; this delay clears the pending sync
+        // request after JS rendering is likely complete.
+        static let splitScrollSyncDelay: TimeInterval = 0.05
+    }
+
+    // MARK: - WebView Helper
+
+    /// Show WebView - centralized method to avoid duplication
+    private func showWebView() {
+        editArea.markdownView?.alphaValue = 1.0
+        editArea.markdownView?.isHidden = false
+    }
+
+    /// Hide WebView - centralized method to avoid duplication
+    private func hideWebView() {
+        editArea.markdownView?.isHidden = true
+        editArea.markdownView?.alphaValue = 1.0
+    }
+
+    /// Restore editor scroll view alpha if it was hidden during startup
+    private func revealEditorIfNeeded() {
+        if editAreaScroll.alphaValue < 1 {
+            editAreaScroll.alphaValue = 1
+        }
+    }
+
+    // MARK: - Preview Management
+    func enablePreview() {
+        // Debounce rapid repeated calls (within 0.15 seconds)
+        let now = Date().timeIntervalSince1970
+        let timeSinceLastCall = now - lastEnablePreviewTime
+        if timeSinceLastCall < 0.15 && sessionPreviewMode {
+            return
+        }
+        lastEnablePreviewTime = now
+
+        let editorScrollRatio = getScrollTop()
+        let editorVisibleLine = editorTopLine()
+
+        if !sessionPreviewMode {
+            savedEditorSelection = editArea.selectedRange()
+            savedEditorScrollRatio = editorScrollRatio
+            savedEditorNoteURL = EditTextView.note?.url
+        }
+
+        if !sessionMagicPPTMode {
+            sessionPreviewMode = true
+        }
+
+        // Defensive: a stale `nextpage-split-mode` body class would leave the
+        // standalone preview without any visible scrollbar. togglePreview
+        // already clears sessionSplitMode, but the underlying WKWebView
+        // class is not toggled by that flag flip alone.
+        editArea.markdownView?.setSplitChrome(false)
+
+        isFocusedTitle = titleLabel.hasFocus()
+        cancelTextSearch()
+
+        // Critical: unhide the preview pane *before* setDisplayMode so
+        // NSSplitView includes it in adjustSubviews. Coming from split via
+        // disableSplitViewMode the previewScroll is isHidden=true, and an
+        // NSSplitView skips hidden subviews when sizing. The result was a
+        // 0-width preview pane (visible white) until the next layout pass.
+        previewScrollView?.isHidden = false
+
+        // Use animated: false to ensure immediate layout update
+        editorContentSplitView?.setDisplayMode(.previewOnly, animated: false)
+
+        preparePreviewContainer(hidden: false)
+
+        previewScrollView?.hasVerticalScroller = true
+
+        // Sync the toolbar tint immediately so the preview button highlights
+        // in the same frame the mode change is committed. refillEditArea
+        // also schedules this asynchronously, but that lands a runloop tick
+        // later and looked unresponsive on the Cmd+3 path.
+        updateToolbarButtonTints()
+
+        ensureNoteSelection(preferLastSelected: true, preserveScrollPosition: true)
+
+        refillEditArea()
+
+        if notesTableView.selectedRow == -1 {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) { [weak self] in
+                guard let self else { return }
+                self.ensureNoteSelection(preferLastSelected: true, preserveScrollPosition: true)
+                if self.notesTableView.selectedRow >= 0 {
+                    self.refillEditArea(force: true)
+                }
+            }
+        }
+
+        titleLabel.isEditable = false
+        // Disable editor's find bar to prevent Cmd+F from being intercepted by NSTextView
+        editArea.usesFindBar = false
+        // Hide editor scrollbar to prevent overlap with preview scrollbar
+        editAreaScroll.hasVerticalScroller = false
+        editAreaScroll.hasHorizontalScroller = false
+
+        // Restore editor scroll alpha if it was hidden during startup
+        revealEditorIfNeeded()
+
+        // Hook focus / scroll restore into the preview's actual didFinish
+        // signal so they land in the same frame the DOM becomes interactive.
+        // The previous fixed asyncAfter(0.1) / asyncAfter(0.3) timers either
+        // fired before the webview was ready (bad scroll) or after it was
+        // long-since ready (visible delay).
+        editArea.markdownView?.runWhenPreviewReady { [weak self] in
+            guard let self else { return }
+            self.editArea.window?.makeFirstResponder(self.editArea.markdownView)
+        }
+        if UserDefaultsManagement.previewLocation == "Editing", !sessionIsExporting {
+            editArea.markdownView?.runWhenPreviewReady { [weak self] in
+                self?.editArea.markdownView?.scrollToLine(editorVisibleLine, fallbackRatio: editorScrollRatio)
+            }
+        }
+    }
+
+    private func enableSplitViewMode() {
+        guard let contentSplitView = editorContentSplitView,
+            previewScrollView != nil
+        else {
+            return
+        }
+        // UX: Ensure a note is selected when entering split mode (prefer last selected note)
+        ensureNoteSelection(preferLastSelected: true)
+
+        // Same NSSplitView trap as enablePreview: a previous disable* path
+        // may have left previewScroll isHidden=true, in which case
+        // adjustSubviews would skip it during setDisplayMode and the right
+        // pane would settle at 0 width. Unhide first so the layout pass
+        // accounts for it.
+        previewScrollView?.isHidden = false
+
+        // Force layout update BEFORE setting display mode to ensure correct bounds
+        contentSplitView.layoutSubtreeIfNeeded()
+
+        // First-time use: setDisplayMode will default to 50/50 split when position is 0
+        // Set split view to side-by-side mode
+        contentSplitView.setDisplayMode(.sideBySide, animated: false)
+
+        // Force layout update to ensure correct bounds
+        contentSplitView.layoutSubtreeIfNeeded()
+
+        preparePreviewContainer(hidden: false)
+
+        // Ensure editor content reflects the selected note alongside preview
+        refillEditArea(force: true)
+
+        // Editor remains editable in split mode and title bar stays visible
+        titleBarView.isHidden = false
+        titleLabel.isHidden = false
+        titleLabel.isEditable = true
+        editArea.usesFindBar = false
+        editAreaScroll.hasVerticalScroller = true
+        editAreaScroll.hasHorizontalScroller = true
+        previewScrollView?.hasVerticalScroller = true
+        previewScrollView?.hasHorizontalScroller = false
+
+        startSplitScrollSync()
+
+        // Hide the WebKit-rendered scrollbar in the right pane so the
+        // editor's NSScrollView overlay scroller is the single visible
+        // indicator. The bidirectional sync keeps both panes aligned, so
+        // hiding the preview scrollbar does not lose information.
+        editArea.markdownView?.setSplitChrome(true)
+
+        // Keep editor focused
+        if !isFocusedTitle {
+            focusEditArea()
+        }
+    }
+
+    func disablePreview() {
+        guard !sessionMagicPPTMode else { return }
+
+        // Save preview scroll position before disabling
+        if let webView = editArea.markdownView {
+            let applyPreviewDisable: (_ ratio: CGFloat?) -> Void = { [weak self, weak webView] ratio in
+                guard let self else { return }
+                guard let webView else { return }
+
+                var storedSelection = self.savedEditorSelection
+                var storedScrollRatio = self.savedEditorScrollRatio
+                let storedNoteURL = self.savedEditorNoteURL
+                let currentNoteURL = EditTextView.note?.url
+                let shouldUseStoredState = storedNoteURL != nil && storedNoteURL == currentNoteURL
+                if !shouldUseStoredState {
+                    storedSelection = nil
+                    storedScrollRatio = nil
+                }
+                let shouldRestoreCursor = storedSelection == nil
+                self.savedEditorSelection = nil
+                self.savedEditorScrollRatio = nil
+                self.savedEditorNoteURL = nil
+
+                self.sessionPreviewMode = false
+                // Close search bar if open
+                webView.hideSearchBar()
+                self.hideWebView()
+                webView.resetPreviewStateForReuse()
+
+                // Switch the split layout to editor-only synchronously so the
+                // user does not see the preview pane disappear, leaving an
+                // empty 0-width editor for ~100ms before it grows back.
+                // sessionSplitMode/needsEditorModeUpdateAfterPreview branches
+                // run their own setDisplayMode so we only do this when no
+                // alternative layout is queued up.
+                let shouldRestoreEditorOnly = !self.needsEditorModeUpdateAfterPreview && !self.sessionSplitMode
+                if shouldRestoreEditorOnly {
+                    self.editorContentSplitView?.setDisplayMode(.editorOnly, animated: false)
+                    self.previewScrollView?.documentView = nil
+                    self.previewScrollView?.isHidden = true
+                    self.previewScrollView?.hasVerticalScroller = false
+                    self.editAreaScroll.hasVerticalScroller = true
+                }
+
+                self.refillEditArea(suppressSave: true)
+                self.editArea.usesFindBar = false
+                // Restore editor scrollbar
+                self.editAreaScroll.hasVerticalScroller = true
+                self.editAreaScroll.hasHorizontalScroller = true
+                // Restore editor scroll alpha
+                self.revealEditorIfNeeded()
+
+                let normalizedRatio = ratio.map { min(max($0, 0), 1) }
+                let ratioToRestore = shouldUseStoredState ? (storedScrollRatio ?? normalizedRatio) : nil
+
+                // Force a layout pass so contentSize / documentView bounds
+                // are valid before we restore scroll position. With the
+                // splitView already collapsed above this is now a single
+                // synchronous tick rather than the previous 0.1s timer.
+                self.editAreaScroll.contentView.layoutSubtreeIfNeeded()
+                self.editArea.layoutSubtreeIfNeeded()
+
+                if let ratio = ratioToRestore,
+                    ratio > 0,
+                    let documentView = self.editAreaScroll.documentView
+                {
+                    let contentHeight = self.editAreaScroll.contentSize.height
+                    let scrollHeight = documentView.bounds.height
+                    let offset = max(scrollHeight - contentHeight, 0)
+                    if offset > 0 {
+                        let scrollTop = offset * ratio
+                        documentView.scroll(NSPoint(x: 0, y: scrollTop))
+                    }
+                }
+
+                self.titleLabel.isEditable = true
+                if !self.isFocusedTitle {
+                    self.focusEditArea(restoreCursor: shouldRestoreCursor)
+                }
+
+                if let storedSelection,
+                    let storage = self.editArea.textStorage
+                {
+                    let clampedLocation = min(max(storedSelection.location, 0), storage.length)
+                    let clampedLength = min(max(storedSelection.length, 0), max(storage.length - clampedLocation, 0))
+                    let clampedRange = NSRange(location: clampedLocation, length: clampedLength)
+                    self.editArea.setSelectedRange(clampedRange)
+                }
+
+                // Apply queued editor-mode change in a follow-up runloop tick.
+                // These branches replace the layout the synchronous block
+                // already chose, so they must run after the user-visible
+                // restoration is committed.
+                if self.needsEditorModeUpdateAfterPreview {
+                    self.needsEditorModeUpdateAfterPreview = false
+                    self.applyEditorModePreferenceChange()
+                } else if self.sessionSplitMode {
+                    self.enableSplitViewMode()
+                }
+            }
+
+            webView.evaluateJavaScript("window.pageYOffset") { scrollTop, _ in
+                guard let scrollTopNumber = scrollTop as? NSNumber else {
+                    applyPreviewDisable(nil)
+                    return
+                }
+                let scrollTopValue = CGFloat(truncating: scrollTopNumber)
+
+                webView.evaluateJavaScript("Math.max(document.body.scrollHeight - window.innerHeight, 0)") { maxScroll, _ in
+                    guard let maxScrollNumber = maxScroll as? NSNumber else {
+                        applyPreviewDisable(nil)
+                        return
+                    }
+                    let maxScrollValue = CGFloat(truncating: maxScrollNumber)
+                    guard maxScrollValue > 0 else {
+                        applyPreviewDisable(nil)
+                        return
+                    }
+
+                    let scrollRatio = scrollTopValue / maxScrollValue
+                    applyPreviewDisable(scrollRatio)
+                }
+            }
+            return
+        }
+
+        // Fallback if no webView (shouldn't happen but for safety)
+        var storedSelection = savedEditorSelection
+        var storedScrollRatio = savedEditorScrollRatio
+        let storedNoteURL = savedEditorNoteURL
+        let currentNoteURL = EditTextView.note?.url
+        let shouldUseStoredState = storedNoteURL != nil && storedNoteURL == currentNoteURL
+        if !shouldUseStoredState {
+            storedSelection = nil
+            storedScrollRatio = nil
+        }
+        let shouldRestoreCursor = storedSelection == nil
+        savedEditorSelection = nil
+        savedEditorScrollRatio = nil
+        savedEditorNoteURL = nil
+        sessionPreviewMode = false
+        // Close search bar if somehow exists
+        editArea.markdownView?.hideSearchBar()
+        refillEditArea(suppressSave: true)
+        editArea.usesFindBar = false
+        // Restore editor scrollbar
+        editAreaScroll.hasVerticalScroller = true
+        editAreaScroll.hasHorizontalScroller = true
+        // Restore editor scroll alpha
+        revealEditorIfNeeded()
+        DispatchQueue.main.async {
+            self.titleLabel.isEditable = true
+            if !self.isFocusedTitle {
+                self.focusEditArea(restoreCursor: shouldRestoreCursor)
+            }
+            if let storedSelection,
+                let storage = self.editArea.textStorage
+            {
+                let clampedLocation = min(max(storedSelection.location, 0), storage.length)
+                let clampedLength = min(max(storedSelection.length, 0), max(storage.length - clampedLocation, 0))
+                let clampedRange = NSRange(location: clampedLocation, length: clampedLength)
+                self.editArea.setSelectedRange(clampedRange)
+            }
+            if let ratio = storedScrollRatio,
+                ratio > 0,
+                let documentView = self.editAreaScroll.documentView
+            {
+                let contentHeight = self.editAreaScroll.contentSize.height
+                let scrollHeight = documentView.bounds.height
+                let offset = max(scrollHeight - contentHeight, 0)
+                if offset > 0 {
+                    let scrollTop = offset * ratio
+                    documentView.scroll(NSPoint(x: 0, y: scrollTop))
+                }
+            }
+        }
+
+        // Restore editor mode based on user preference
+        if needsEditorModeUpdateAfterPreview {
+            needsEditorModeUpdateAfterPreview = false
+            applyEditorModePreferenceChange()
+        } else if sessionSplitMode {
+            enableSplitViewMode()
+        } else {
+            editorContentSplitView?.setDisplayMode(.editorOnly, animated: false)
+
+            // Clear preview views AFTER setDisplayMode
+            previewScrollView?.documentView = nil
+            previewScrollView?.isHidden = true
+            previewScrollView?.hasVerticalScroller = false
+            editAreaScroll.hasVerticalScroller = true
+        }
+    }
+
+    private func disableSplitViewMode() {
+        guard let contentSplitView = editorContentSplitView else { return }
+
+        // Set display mode back to editor only (no animation for immediate effect)
+        contentSplitView.setDisplayMode(.editorOnly, animated: false)
+        stopSplitScrollSync()
+
+        // Clear preview container
+        previewScrollView?.documentView = nil
+        previewScrollView?.isHidden = true
+        editArea.markdownView?.isHidden = true
+        previewScrollView?.hasVerticalScroller = false
+        editAreaScroll.hasVerticalScroller = true
+
+        // Restore the WebKit scrollbar so the next time the preview is shown
+        // standalone (Cmd+3) it has its own position indicator.
+        editArea.markdownView?.setSplitChrome(false)
+
+        // Split mode doesn't affect preview state - don't set preview=false here
+        titleLabel.isEditable = true
+
+        if !isFocusedTitle {
+            focusEditArea()
+        }
+    }
+
+    func togglePreview() {
+        saveTitleSafely()
+
+        if sessionPreviewMode {
+            disablePreview()
+        } else {
+            enablePreview()
+        }
+    }
+
+    @IBAction func toggleSplitView(_ sender: Any) {
+        saveTitleSafely()
+        sessionSplitMode.toggle()
+
+        if sessionPreviewMode {
+            disablePreview()
+        } else {
+            applyEditorModePreferenceChange()
+        }
+    }
+
+    // Debug helper - can call this from console or add a menu item
+    @objc func resetSplitViewPosition() {
+        UserDefaultsManagement.editorContentSplitPosition = 0
+        if sessionSplitMode {
+            editorContentSplitView?.setDisplayMode(.sideBySide, animated: false)
+        }
+    }
+
+    func applyEditorModePreferenceChange() {
+        // Defer mode changes if in special modes (preview, presentation, PPT)
+        guard !UserDefaultsManagement.isInSpecialMode else {
+            needsEditorModeUpdateAfterPreview = true
+            return
+        }
+
+        // Ensure split view is initialized
+        guard editorContentSplitView != nil else {
+            return
+        }
+
+        needsEditorModeUpdateAfterPreview = false
+
+        if sessionSplitMode {
+            enableSplitViewMode()
+        } else {
+            disableSplitViewMode()
+        }
+
+        // Update toolbar button state (Unified split icon for both states)
+        if let image = NSImage(named: "icon_editor_split") {
+            image.isTemplate = true
+            toggleSplitButton?.image = image
+        }
+
+    }
+
+    private func makeTempNote() -> Note? {
+        let tempProject = getSidebarProject() ?? storage.noteList.first?.project
+        guard let project = tempProject else { return nil }
+        let tempNote = Note(name: "", project: project, type: .markdown)
+        tempNote.content = NSMutableAttributedString(string: "")
+        return tempNote
+    }
+
+    // MARK: - Presentation Mode
+
+    private func savePresentationLayout() {
+        let currentSidebarWidth = sidebarWidth
+        let currentNotelistWidth = notelistWidth
+
+        if currentSidebarWidth > Theme.Metrics.sidebarCollapseSnapWidth {
+            UserDefaultsManagement.realSidebarSize = Int(currentSidebarWidth)
+        }
+        if currentNotelistWidth >= Theme.Metrics.noteListMinimumWidth {
+            UserDefaultsManagement.sidebarSize = Int(currentNotelistWidth)
+        }
+        if let clipView = notesTableView.superview as? NSClipView {
+            savedPresentationScrollPosition = clipView.bounds.origin
+        }
+    }
+
+    private func restorePresentationLayout() {
+        formatButton.isHidden = false
+        previewButton.isHidden = false
+        toggleListButton?.isHidden = false
+        toggleSplitButton?.isHidden = false
+
+        if sidebarWidth == 0 { showSidebar("") }
+        if notelistWidth == 0 { showNoteList("") }
+        checkTitlebarTopConstraint()
+
+        if let savedPosition = savedPresentationScrollPosition {
+            notesTableView.restoreScrollOrigin(savedPosition)
+            savedPresentationScrollPosition = nil
+        }
+    }
+
+    func enablePresentation() {
+        // Ensure a note is selected before entering presentation mode
+        ensureNoteSelection(preferLastSelected: true)
+
+        // Defensive: same as enablePreview, presentation is a single-pane
+        // mode so the body should not carry the split-mode class.
+        editArea.markdownView?.setSplitChrome(false)
+
+        sessionPresentationMode = true
+        savePresentationLayout()
+        hideNoteList("")
+        formatButton.isHidden = true
+        previewButton.isHidden = true
+        toggleListButton?.isHidden = true
+        toggleSplitButton?.isHidden = true
+
+        // Set up split view and preview container synchronously.
+        // Unhide previewScroll *before* setDisplayMode so NSSplitView's
+        // adjustSubviews includes it. Same trap that affected enablePreview;
+        // matching the order across all enable* paths.
+        previewScrollView?.isHidden = false
+        editorContentSplitView?.setDisplayMode(.previewOnly, animated: false)
+        preparePreviewContainer(hidden: false)
+        previewScrollView?.hasVerticalScroller = true
+
+        // Force immediate content load
+        if editArea.markdownView != nil {
+            showWebView()
+        }
+
+        // Load content in presentation mode
+        refillEditArea(previewOnly: true, force: true)
+        updateToolbarButtonTints()
+        // Disable editor's find bar to prevent Cmd+F from being intercepted by NSTextView
+        editArea.usesFindBar = false
+        // Hide editor scrollbar to prevent overlap with preview scrollbar
+        editAreaScroll.hasVerticalScroller = false
+        editAreaScroll.hasHorizontalScroller = false
+        if !sessionFullScreenMode {
+            view.window?.toggleFullScreen(nil)
+        }
+        if !sessionIsExportingPPT {
+            DispatchQueue.main.asyncAfter(deadline: .now() + EditorTiming.presentationLayoutDelay) {
+                self.toast(message: I18n.str("Press ESC key to exit~"))
+            }
+        }
+    }
+
+    func disablePresentation() {
+        // Clear state immediately so guards in deleteNote etc. stop blocking
+        sessionPresentationMode = false
+        updateToolbarButtonTints()
+
+        let restoreLayout: () -> Void = { [weak self] in
+            guard let self = self else { return }
+            self.restorePresentationLayout()
+            self.disablePreview()
+            self.updateButtonStates()
+        }
+
+        if sessionFullScreenMode {
+            // Defer layout restore to the actual end of the fullscreen-exit
+            // animation. macOS takes ~700ms; the previous fixed 0.15s timer
+            // landed during the animation and made the sidebar / notelist
+            // sizes pop after the user could already see the window.
+            sessionFullScreenMode = false
+            let appDelegate = NSApplication.shared.delegate as? AppDelegate
+            appDelegate?.mainWindowController?.pendingPostFullScreenAction = restoreLayout
+            view.window?.toggleFullScreen(nil)
+        } else {
+            // Already non-fullscreen (e.g. invoked from windowDidExitFullScreen
+            // auto-exit), no transition to wait for.
+            restoreLayout()
+        }
+    }
+
+    // MARK: - Helper Methods
+    private func updateButtonStates() {
+        DispatchQueue.main.async {
+            self.updateToolbarButtonTints()
+        }
+    }
+
+    func togglePresentation() {
+        saveTitleSafely()
+        // Handle both presentation and PPT modes
+        if sessionPresentationMode || sessionMagicPPTMode {
+            if sessionMagicPPTMode {
+                disableNextpagePPT()
+            } else {
+                disablePresentation()
+            }
+        } else {
+            enablePresentation()
+        }
+    }
+    // MARK: - PPT Mode
+
+    func isNextpagePPT(needToast: Bool = true) -> Bool {
+        guard let note = notesTableView.getSelectedNote() else {
+            return false
+        }
+        let content = note.content.string
+        if content.contains("---") {
+            return true
+        }
+        if needToast {
+            toast(message: I18n.str("No delimiter --- identification, Cannot use Nextpage PPT~"), style: .failure)
+        }
+        return false
+    }
+
+    func toggleMagicPPT() {
+        saveTitleSafely()
+        if sessionMagicPPTMode {
+            disableNextpagePPT()
+        } else {
+            if !isNextpagePPT() {
+                return
+            }
+            enableNextpagePPT()
+        }
+    }
+
+    func enableNextpagePPT() {
+        // Ensure a note is selected before entering PPT mode
+        ensureNoteSelection(preferLastSelected: true)
+
+        // Defensive: PPT replaces the page chrome with Reveal.js layout, but
+        // the body class would otherwise persist from a prior split session
+        // and accidentally hide Reveal's own scroll affordances.
+        editArea.markdownView?.setSplitChrome(false)
+
+        sessionMagicPPTMode = true
+        savePresentationLayout()
+        hideNoteList("")
+        hideNoteList("")
+        formatButton.isHidden = true
+        previewButton.isHidden = true
+        toggleListButton?.isHidden = true
+        toggleSplitButton?.isHidden = true
+        DispatchQueue.main.async { [self] in
+            updateToolbarButtonTints()
+        }
+        if !sessionFullScreenMode {
+            view.window?.toggleFullScreen(nil)
+        }
+
+        // Set up split view and preview container synchronously.
+        // Unhide previewScroll *before* setDisplayMode so NSSplitView's
+        // adjustSubviews includes it. See enablePreview comment for the
+        // hidden-subview adjustSubviews trap.
+        previewScrollView?.isHidden = false
+        editorContentSplitView?.setDisplayMode(.previewOnly, animated: false)
+        preparePreviewContainer(hidden: false)
+        previewScrollView?.hasVerticalScroller = true
+
+        // Force immediate content load
+        if editArea.markdownView != nil {
+            showWebView()
+        }
+
+        // Load content in PPT mode
+        refillEditArea()
+        // Disable editor's find bar to prevent Cmd+F from being intercepted by NSTextView
+        editArea.usesFindBar = false
+        // Hide editor scrollbar to prevent overlap with preview scrollbar
+        editAreaScroll.hasVerticalScroller = false
+        editAreaScroll.hasHorizontalScroller = false
+        DispatchQueue.main.async { [self] in
+            titiebarHeight.constant = 0.0
+            titleLabel.isHidden = true
+            titleBarView.isHidden = true
+            handlePPTAutoTransition()
+        }
+        if !sessionIsExportingPPT {
+            DispatchQueue.main.asyncAfter(deadline: .now() + EditorTiming.presentationLayoutDelay) { [self] in
+                toast(message: I18n.str("Press ESC key to exit~"))
+            }
+        }
+    }
+
+    func handlePPTAutoTransition() {
+        // Get cursor position and auto-navigate
+        let range = editArea.selectedRange
+        // If selectedIndex > editArea.string.count(), use string.count() value
+        // If final calculation is negative, use 0
+        let selectedIndex = max(min(range.location, editArea.string.count) - 1, 0)
+        let beforeString = editArea.string[..<selectedIndex]
+        let hrCount = beforeString.components(separatedBy: "---").count
+
+        // Both auto-slide and focus need the bundle navigation to be live
+        // first. Previously these were two parallel asyncAfter timers
+        // (0.3s + 0.6s) that could fire in either order, leaving the
+        // webview focused but on the wrong slide for ~700ms.
+        editArea.markdownView?.runWhenPreviewReady { [weak self] in
+            guard let self else { return }
+            if UserDefaultsManagement.previewLocation == "Editing", hrCount > 1 {
+                self.editArea.markdownView?.slideTo(index: hrCount - 1)
+            }
+            NSApp.mainWindow?.makeFirstResponder(self.editArea.markdownView)
+        }
+    }
+
+    func disableNextpagePPT() {
+        // Clear magicPPT flag FIRST to allow disablePreview to work properly
+        sessionMagicPPTMode = false
+
+        // Collapse the previous three separate DispatchQueue.main.async hops
+        // into one synchronous block so the title bar comes back in a single
+        // frame rather than being toggled three times across runloop ticks.
+        // titiebarHeight, titleLabel/titleBarView visibility, and toolbar
+        // tint must all be coherent before any asynchronous follow-up.
+        updateToolbarButtonTints()
+        titleLabel.isHidden = false
+        titleBarView.isHidden = false
+        titiebarHeight.constant = 40.0
+        titleLabel.isEditable = true
+
+        // Hide webview immediately rather than leaving stale PPT view during animation
+        if editArea.markdownView != nil {
+            hideWebView()
+        }
+
+        let restoreLayout: () -> Void = { [weak self] in
+            guard let self = self else { return }
+            self.restorePresentationLayout()
+            self.disablePreview()
+            self.updateButtonStates()
+            self.focusEditArea()
+        }
+
+        if sessionFullScreenMode {
+            // Same treatment as disablePresentation: wait for the actual
+            // fullscreen-exit animation to land instead of guessing 0.15s
+            // and then re-laying out into a half-animated frame.
+            sessionFullScreenMode = false
+            let appDelegate = NSApplication.shared.delegate as? AppDelegate
+            appDelegate?.mainWindowController?.pendingPostFullScreenAction = restoreLayout
+            view.window?.toggleFullScreen(nil)
+        } else {
+            restoreLayout()
+        }
+    }
+
+    // MARK: - Text Formatting
+    func formatText() {
+        if sessionPreviewMode {
+            toast(
+                message: I18n.str("Format is only possible after exiting preview mode~"), style: .failure
+            )
+            return
+        }
+        if isFormatting {
+            formatTask?.cancel()
+            formatTask = nil
+            isFormatting = false
+            updateFormatButtonState(isFormatting: false)
+            toast(message: I18n.str("Formatting cancelled"))
+            return
+        }
+
+        if let note = notesTableView.getSelectedNote() {
+            // Same ownership rule as cleanTypography: the buffer being
+            // formatted must belong to the selected note (#543). The apply
+            // path writes via note.save(attributed:), which does not pass
+            // through saveTextStorageContent's owner guard.
+            guard editArea.storageNote === note else { return }
+            isFormatting = true
+            updateFormatButtonState(isFormatting: true)
+            formatRequestID += 1
+            let requestID = formatRequestID
+            let noteURL = note.url
+            saveTitleSafely()
+
+            // Get latest content from editor to ensure consistency
+            let content = editArea.textStorage?.string ?? note.content.string
+            let cursor = editArea.selectedRanges[0].rangeValue.location
+            let top = editAreaScroll.contentView.bounds.origin.y
+
+            formatTask = Task(priority: .userInitiated) { [weak self] in
+                guard let self else { return }
+                do {
+                    let output = try await self.markdownFormatWorker.format(content: content, cursor: cursor)
+                    if Task.isCancelled {
+                        return
+                    }
+
+                    await MainActor.run {
+                        self.applyFormattingResult(output, content: content, noteURL: noteURL, requestID: requestID, top: top)
+                    }
+                } catch is CancellationError {
+                    await MainActor.run {
+                        guard self.formatRequestID == requestID else { return }
+                        self.isFormatting = false
+                        self.updateFormatButtonState(isFormatting: false)
+                        self.formatTask = nil
+                    }
+                } catch {
+                    await MainActor.run {
+                        guard self.formatRequestID == requestID else { return }
+                        AppDelegate.trackError(error, context: "ViewController+Editor.format")
+                        self.toast(message: I18n.str("Formatting failed, please try again"), style: .failure)
+                        self.isFormatting = false
+                        self.updateFormatButtonState(isFormatting: false)
+                        self.formatTask = nil
+                    }
+                }
+            }
+        }
+    }
+
+    private func applyFormattingResult(_ output: MarkdownFormatOutput, content: String, noteURL: URL, requestID: Int, top: CGFloat) {
+        guard formatRequestID == requestID else {
+            return
+        }
+
+        guard let note = notesTableView.getSelectedNote(), note.url == noteURL,
+            editArea.storageNote === note
+        else {
+            isFormatting = false
+            updateFormatButtonState(isFormatting: false)
+            formatTask = nil
+            return
+        }
+
+        let restoredContent = HtmlManager.restoreHTMLTags(in: output.formattedString, with: output.placeholders)
+        var newContent = restoredContent
+        let originalLines = content.components(separatedBy: .newlines)
+        if originalLines.count > 1 && !restoredContent.contains("\n") {
+            newContent = content
+        } else if content.last != "\n" && restoredContent.last == "\n" {
+            newContent = restoredContent.removeLastNewLine()
+        }
+
+        replaceEditorStorage(with: newContent, note: note)
+
+        let adjustedCursorOffset = HtmlManager.adjustCursorAfterRestore(originalOffset: output.cursorOffset, protected: output.protectedContent, restored: newContent)
+        editArea.setSelectedRange(NSRange(location: adjustedCursorOffset, length: 0))
+        formatContent = newContent
+        note.save(attributed: editArea.attributedString())
+
+        restoreEditorScrollPosition(top)
+
+        toast(message: I18n.str("Automatic typesetting succeeded~"), style: .success)
+
+        if sessionSplitMode, let previewView = editArea.markdownView {
+            previewView.updateContent(note: note)
+        }
+
+        isFormatting = false
+        updateFormatButtonState(isFormatting: false)
+        formatTask = nil
+    }
+
+    private func replaceEditorStorage(with newContent: String, note: Note) {
+        guard let storage = editArea.textStorage else {
+            editArea.string = newContent
+            return
+        }
+        let originalLength = storage.length
+        storage.beginEditing()
+        storage.replaceCharacters(in: NSRange(0..<originalLength), with: newContent)
+        NotesTextProcessor.checkPerformanceLevel(attributedString: storage, note: note)
+        if NotesTextProcessor.shouldUseSimplifiedHighlighting {
+            NotesTextProcessor.highlightBasicMarkdown(attributedString: storage, note: note)
+        } else {
+            NotesTextProcessor.highlightMarkdown(attributedString: storage, note: note)
+            NotesTextProcessor.highlightFencedAndIndentCodeBlocks(attributedString: storage)
+        }
+        storage.updateParagraphStyle()
+        let fullRange = NSRange(location: 0, length: storage.length)
+        let linkProcessor = NotesTextProcessor(storage: storage, range: fullRange)
+        linkProcessor.highlightLinks()
+        storage.applyEditorLetterSpacing()
+        storage.endEditing()
+    }
+
+    /// CJK typography cleanup for the whole document: pangu spacing, punctuation
+    /// width, stray em dashes, ASCII ellipsis, and blank-line runs. Pure local
+    /// string work, so unlike `formatText` it applies synchronously.
+    @IBAction func cleanTypography(_ sender: Any?) {
+        if sessionPreviewMode {
+            toast(
+                message: I18n.str("Format is only possible after exiting preview mode~"), style: .failure
+            )
+            return
+        }
+        // The rewrite below runs against the editor buffer, so the target note
+        // must be the buffer's owner. The table selection can already point at
+        // a different note while an async fill is still loading it (#543).
+        guard let note = EditTextView.note, editArea.storageNote === note else { return }
+        saveTitleSafely()
+
+        let content = editArea.textStorage?.string ?? note.content.string
+        let cleaned = TypographyCleaner.clean(content)
+        guard cleaned != content else {
+            toast(message: I18n.str("Typography is already clean~"))
+            return
+        }
+
+        let cursor = editArea.selectedRanges[0].rangeValue.location
+        let top = editAreaScroll.contentView.bounds.origin.y
+
+        // Insert through the text-view editing path (not direct storage mutation)
+        // so the whole-document rewrite lands in the undo stack.
+        EditTextView.shouldForceRescan = true
+        editArea.breakUndoCoalescing()
+        editArea.insertText(cleaned, replacementRange: NSRange(location: 0, length: (editArea.string as NSString).length))
+        editArea.saveTextStorageContent(to: note)
+        note.save()
+        editArea.setSelectedRange(NSRange(location: min(cursor, (cleaned as NSString).length), length: 0))
+        formatContent = cleaned
+        restoreEditorScrollPosition(top)
+        toast(message: I18n.str("Typography cleaned up~"), style: .success)
+
+        if sessionSplitMode, let previewView = editArea.markdownView {
+            previewView.updateContent(note: note)
+        }
+    }
+
+    private func updateFormatButtonState(isFormatting: Bool) {
+        formatButton.isEnabled = true
+        formatButton.alphaValue = isFormatting ? 0.6 : 1.0
+        formatButton.toolTip = isFormatting ? I18n.str("Formatting... click again to cancel") : I18n.str("Format")
+    }
+
+    private func restoreEditorScrollPosition(_ top: CGFloat) {
+        NSAnimationContext.beginGrouping()
+        NSAnimationContext.current.duration = 0
+        NSAnimationContext.current.allowsImplicitAnimation = false
+        editAreaScroll.contentView.setBoundsOrigin(NSPoint(x: 0, y: top))
+        editAreaScroll.reflectScrolledClipView(editAreaScroll.contentView)
+        NSAnimationContext.endGrouping()
+    }
+
+    // MARK: - WebView Management
+    func getScrollTop() -> CGFloat {
+        let contentHeight = editAreaScroll.contentSize.height
+        let scrollTop = editAreaScroll.contentView.bounds.origin.y
+        let scrollHeight = editAreaScroll.documentView!.bounds.height
+        if scrollHeight - contentHeight > 0, scrollTop > 0 {
+            return scrollTop / (scrollHeight - contentHeight)
+        } else {
+            return 0.0
+        }
+    }
+
+    func preloadWebView() {
+        guard editArea.markdownView == nil, !sessionPreviewMode else { return }
+        guard let tempNote = makeTempNote() else { return }
+        let frame = previewScrollView?.bounds ?? editArea.bounds
+        let previewView = MPreviewView(frame: frame, note: tempNote, closure: {})
+        previewView.autoresizingMask = [.width, .height]
+        previewView.isHidden = true
+        editArea.markdownView = previewView
+        preparePreviewContainer(hidden: true)
+    }
+
+    @MainActor
+    func preparePreviewContainer(hidden: Bool = false) {
+        guard let previewScroll = previewScrollView else {
+            return
+        }
+
+        if editArea.markdownView == nil {
+            let frame = previewScroll.bounds
+            let fallbackNote = notesTableView.getSelectedNote() ?? makeTempNote()
+            guard let note = fallbackNote else {
+                return
+            }
+            let markdownView = MPreviewView(frame: frame, note: note, closure: {})
+            markdownView.autoresizingMask = [.width, .height]
+            editArea.markdownView = markdownView
+        }
+
+        guard let markdownView = editArea.markdownView else {
+            return
+        }
+
+        let alreadyAttached =
+            markdownView.superview === previewScroll
+            && previewScroll.documentView === markdownView
+        if !alreadyAttached {
+            markdownView.removeFromSuperview()
+            previewScroll.documentView = markdownView
+        }
+        // Always sync the cheap state. Even on the fast path the bounds may
+        // have changed (e.g. window resized while preview was inactive).
+        markdownView.frame = previewScroll.bounds
+        markdownView.autoresizingMask = [.width, .height]
+        markdownView.isHidden = hidden
+        // Alpha is managed by enablePreview/fill to support Soft Reveal
+        // if !hidden { markdownView.alphaValue = 1.0 }
+        previewScroll.isHidden = hidden
+    }
+
+    private func startSplitScrollSync() {
+        guard sessionSplitMode,
+            splitScrollObserver == nil,
+            let editorClip = editAreaScroll?.contentView as? NSClipView
+        else {
+            return
+        }
+
+        editorClip.postsBoundsChangedNotifications = true
+
+        // Monitor editor scrolling
+        splitScrollObserver = NotificationCenter.default.addObserver(
+            forName: NSView.boundsDidChangeNotification,
+            object: editorClip,
+            queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated {
+                self?.handleSplitScrollEvent()
+            }
+        }
+
+        // Monitor preview (WebView) scrolling via delegate
+        if let markdownView = editArea.markdownView {
+            markdownView.scrollDelegate = self
+        }
+
+        activeSplitScrollSource = .editor
+
+        scheduleSplitScrollSync()
+    }
+
+    private func stopSplitScrollSync() {
+        if let observer = splitScrollObserver {
+            NotificationCenter.default.removeObserver(observer)
+            splitScrollObserver = nil
+        }
+        // Clear preview scroll delegate
+        editArea.markdownView?.scrollDelegate = nil
+        splitScrollSuppressionCount = 0
+        activeSplitScrollSource = .editor
+        lastSyncedLine = -1
+    }
+
+    private func handleSplitScrollEvent() {
+        guard splitScrollSuppressionCount == 0 else { return }
+        guard editArea.markdownView?.isUpdatingContent != true else {
+            return
+        }
+        activeSplitScrollSource = .editor
+        // Use debounce instead of blocking to ensure all user scrolls (including typing) are synced
+        scheduleSplitScrollSync()
+    }
+
+    // MARK: - MPreviewScrollDelegate
+
+    func previewDidScroll(line: CGFloat) {
+        guard splitScrollSuppressionCount == 0,
+            sessionSplitMode,
+            editArea.markdownView?.isUpdatingContent != true
+        else { return }
+        activeSplitScrollSource = .preview
+        splitScrollSuppressionCount += 1
+
+        let lineInt = Int(line)
+        let fraction = line - CGFloat(lineInt)
+        let rect = editorLineRect(forLine: lineInt)
+        guard rect != .zero,
+            let documentView = editAreaScroll.documentView
+        else {
+            splitScrollSuppressionCount -= 1
+            return
+        }
+        let contentHeight = editAreaScroll.contentSize.height
+        let maxOffset = max(documentView.bounds.height - contentHeight, 0)
+        let targetY = max(0, min(rect.minY + fraction * rect.height, maxOffset))
+        let currentY = editAreaScroll.contentView.bounds.origin.y
+        guard abs(targetY - currentY) > 0.5 else {
+            splitScrollSuppressionCount -= 1
+            return
+        }
+        editAreaScroll.contentView.setBoundsOrigin(NSPoint(x: 0, y: targetY))
+        editAreaScroll.reflectScrolledClipView(editAreaScroll.contentView)
+        DispatchQueue.main.async { [weak self] in
+            self?.splitScrollSuppressionCount = max(0, (self?.splitScrollSuppressionCount ?? 0) - 1)
+        }
+    }
+
+    private func editorLineRect(forLine line: Int) -> NSRect {
+        guard let lm = editArea.layoutManager,
+            let tc = editArea.textContainer,
+            let storage = editArea.textStorage
+        else { return .zero }
+        let starts = lineStarts(for: storage)
+        guard !starts.isEmpty else { return .zero }
+        let clamped = max(0, min(line, starts.count - 1))
+        let loc = min(starts[clamped], storage.length)
+        let glyphRange = lm.glyphRange(
+            forCharacterRange: NSRange(location: loc, length: 0),
+            actualCharacterRange: nil
+        )
+        let rect = lm.boundingRect(forGlyphRange: glyphRange, in: tc)
+        return rect.offsetBy(dx: editArea.textContainerOrigin.x, dy: editArea.textContainerOrigin.y)
+    }
+
+    private func scheduleSplitScrollSync() {
+        guard sessionSplitMode, activeSplitScrollSource == .editor else { return }
+        let topLine = editorTopLine()
+        guard abs(topLine - lastSyncedLine) >= 0.25 else { return }
+        lastSyncedLine = topLine
+        applySplitScrollSync(line: topLine)
+    }
+
+    private func applySplitScrollSync(line: CGFloat) {
+        guard sessionSplitMode else { return }
+        splitScrollSuppressionCount += 1
+        editArea.markdownView?.scrollToLine(line)
+        DispatchQueue.main.asyncAfter(deadline: .now() + EditorTiming.splitScrollSyncDelay) { [weak self] in
+            self?.splitScrollSuppressionCount = max(0, (self?.splitScrollSuppressionCount ?? 0) - 1)
+        }
+    }
+
+    private func editorTopLine() -> CGFloat {
+        let topY = editAreaScroll.contentView.bounds.origin.y
+        guard let lm = editArea.layoutManager,
+            let tc = editArea.textContainer,
+            let storage = editArea.textStorage
+        else { return 1 }
+        let adjustedY = max(topY - editArea.textContainerOrigin.y, 0)
+        let charIndex = lm.characterIndex(
+            for: NSPoint(x: 8, y: adjustedY),
+            in: tc,
+            fractionOfDistanceBetweenInsertionPoints: nil
+        )
+        let starts = lineStarts(for: storage)
+        guard !starts.isEmpty else { return 1 }
+        let clamped = min(charIndex, storage.length)
+        // Binary search the largest line start <= clamped.
+        var lo = 0
+        var hi = starts.count - 1
+        while lo < hi {
+            let mid = (lo + hi + 1) / 2
+            if starts[mid] <= clamped { lo = mid } else { hi = mid - 1 }
+        }
+        return CGFloat(lo + 1)
+    }
+
+    // Lazily-populated, per-document cache of line-start character indices.
+    // textDidChange invalidates via invalidateEditorLineCache() so the next
+    // sync rebuilds. Length comparison is a defensive cross-check for missed
+    // invalidations (programmatic content swaps that bypass textDidChange).
+    private func lineStarts(for storage: NSTextStorage) -> [Int] {
+        if let cached = editorLineStartsCache, editorLineStartsCacheLength == storage.length {
+            return cached
+        }
+        let ns = storage.string as NSString
+        var starts: [Int] = [0]
+        starts.reserveCapacity(max(64, ns.length / 40))
+        ns.enumerateSubstrings(
+            in: NSRange(location: 0, length: ns.length),
+            options: [.byLines, .substringNotRequired]
+        ) { _, _, enclosing, _ in
+            let next = enclosing.location + enclosing.length
+            if next < ns.length { starts.append(next) }
+        }
+        editorLineStartsCache = starts
+        editorLineStartsCacheLength = storage.length
+        return starts
+    }
+
+    func invalidateEditorLineCache() {
+        editorLineStartsCache = nil
+        editorLineStartsCacheLength = -1
+    }
+
+    func cancelTextSearch() {
+        if sessionPreviewMode || sessionPresentationMode || sessionMagicPPTMode {
+            editArea.markdownView?.hideSearchBar()
+        } else {
+            editArea.hideSearchBar()
+        }
+        NSApp.mainWindow?.makeFirstResponder(editArea)
+    }
+
+    @IBAction func togglePreview(_ sender: NSButton) {
+        togglePreview()
+    }
+
+    @IBAction func togglePresentation(_ sender: NSButton) {
+        togglePresentation()
+    }
+
+    /// Toggle the table-of-contents panel in the preview pane. Only meaningful
+    /// when a preview WebView exists (preview or split mode); the menu item is
+    /// disabled otherwise via `validateMenuItem`.
+    @IBAction func toggleTOC(_ sender: Any) {
+        editArea.markdownView?.toggleTOC()
+    }
+
+    // MARK: - Font Zoom
+
+    /// Shared lower/upper bounds for the ⌘=/⌘-/⌘0 font zoom, matching the
+    /// discrete range offered by the typography preferences popup so the two
+    /// entry points stay consistent.
+    private var zoomFontSizeRange: ClosedRange<Int> { 12...28 }
+
+    /// ⌘+ (and ⌘= via `handleKeyDown`): grow editor and preview fonts together.
+    @IBAction func zoomInFontSize(_ sender: Any) {
+        adjustFontSize(by: 1)
+    }
+
+    /// ⌘-: shrink editor and preview fonts together.
+    @IBAction func zoomOutFontSize(_ sender: Any) {
+        adjustFontSize(by: -1)
+    }
+
+    /// ⌘0: restore editor and preview fonts to their default sizes.
+    @IBAction func resetFontSize(_ sender: Any) {
+        let alreadyDefault =
+            UserDefaultsManagement.fontSize == UserDefaultsManagement.DefaultFontSize
+            && UserDefaultsManagement.previewFontSize == UserDefaultsManagement.DefaultPreviewFontSize
+        guard !alreadyDefault else { return }
+        UserDefaultsManagement.fontSize = UserDefaultsManagement.DefaultFontSize
+        UserDefaultsManagement.previewFontSize = UserDefaultsManagement.DefaultPreviewFontSize
+        applyFontSizeChange(announcing: UserDefaultsManagement.DefaultFontSize)
+    }
+
+    /// Move the editor font (and the preview font in lockstep) by `delta`,
+    /// gating on the editor size so both surfaces stay clamped to the same
+    /// range. No-ops silently once the editor hits a bound.
+    func adjustFontSize(by delta: Int) {
+        let current = UserDefaultsManagement.fontSize
+        let newSize = clampToZoomRange(current + delta)
+        guard newSize != current else { return }
+        UserDefaultsManagement.fontSize = newSize
+        UserDefaultsManagement.previewFontSize = clampToZoomRange(UserDefaultsManagement.previewFontSize + delta)
+        applyFontSizeChange(announcing: newSize)
+    }
+
+    private func clampToZoomRange(_ value: Int) -> Int {
+        min(max(value, zoomFontSizeRange.lowerBound), zoomFontSizeRange.upperBound)
+    }
+
+    /// Reuse the preferences font-apply path (refresh highlighter + fonts, then
+    /// rebuild the editor and bounce the preview if it is live) and surface the
+    /// new size so the change is visible even in plain editing mode.
+    private func applyFontSizeChange(announcing size: Int) {
+        EditorSettings().applyChanges()
+        toast(message: String(format: I18n.str("Font size: %d"), size), style: .info)
+    }
+
+    @IBAction func toggleMagicPPT(_ sender: Any) {
+        saveTitleSafely()
+        if sessionMagicPPTMode {
+            disableNextpagePPT()
+        } else {
+            if !isNextpagePPT() {
+                return
+            }
+            enableNextpagePPT()
+        }
+    }
+
+    @IBAction func formatText(_ sender: NSButton) {
+        formatText()
+    }
+
+    // MARK: - Editor Focus Management
+    func focusEditArea(firstResponder: NSResponder? = nil, restoreCursor: Bool = true) {
+        guard EditTextView.note != nil else { return }
+        var resp: NSResponder = editArea
+        if let responder = firstResponder {
+            resp = responder
+        }
+        if notesTableView.selectedRow > -1 {
+            DispatchQueue.main.async {
+                self.editArea.isEditable = true
+                // Only show title bar if not in PPT mode
+                if !self.sessionMagicPPTMode {
+                    self.titleBarView.isHidden = false
+                }
+                self.editArea.window?.makeFirstResponder(resp)
+                if restoreCursor {
+                    self.editArea.restoreCursorPosition()
+                }
+            }
+            return
+        }
+        editArea.window?.makeFirstResponder(resp)
+    }
+
+    func focusTable() {
+        DispatchQueue.main.async {
+            let index = self.notesTableView.selectedRow > -1 ? self.notesTableView.selectedRow : 0
+            self.notesTableView.window?.makeFirstResponder(self.notesTableView)
+            self.notesTableView.selectRowIndexes([index], byExtendingSelection: false)
+            self.notesTableView.scrollRowToVisible(row: index, animated: true)
+        }
+    }
+
+    // MARK: - Editor Content Management
+    func refillEditArea(
+        cursor: Int? = nil,
+        previewOnly: Bool = false,
+        saveTyping: Bool = false,
+        force: Bool = false,
+        animatePreview: Bool = true,
+        suppressSave: Bool = false
+    ) {
+        DispatchQueue.main.async { [weak self] in
+            self?.updateToolbarButtonTints()
+        }
+        // Allow content refill in these scenarios:
+        // - Normal refill (not preview-only), or
+        // - Preview-only refill when in any preview/presentation mode (including split view mode), or
+        // - Force refill regardless of conditions
+        // Note: Split view mode needs preview refill to update the preview pane content
+        guard force || !previewOnly || (previewOnly && shouldShowPreview) else {
+            return
+        }
+
+        // Fix race condition: Cancel any pending table selection updates to prevent them from interfering with this refill
+        notesTableView.loadingQueue.cancelAllOperations()
+
+        DispatchQueue.main.async {
+            let now = ProcessInfo.processInfo.systemUptime
+            let isRapidPreviewSwitch = self.shouldShowPreview && (now - self.lastPreviewReloadTime) < 0.2
+            if self.shouldShowPreview {
+                self.lastPreviewReloadTime = now
+            }
+            var location: Int = 0
+            if let unwrappedCursor = cursor {
+                location = unwrappedCursor
+            } else {
+                location = self.editArea.selectedRanges[0].rangeValue.location
+            }
+            let selected = self.notesTableView.selectedRow
+            if selected > -1, self.notesTableView.noteList.indices.contains(selected) {
+                if let note = self.notesTableView.getSelectedNote() {
+                    // Safety: Ensure current editor content is saved to note before reloading
+                    // This prevents data loss during rapid view switching where the editor might be dirty
+                    let shouldPersistEditor = !self.shouldShowPreview || self.sessionSplitMode
+                    if shouldPersistEditor,
+                        let currentNote = EditTextView.note,
+                        currentNote === note,
+                        force || !previewOnly
+                    {
+                        if !suppressSave {
+                            // SAFETY CHECK: Prevent overwriting content with empty string during view mode toggle
+                            // This catches the specific data loss case where editor content is lost but note exists
+                            if self.editArea.string.isEmpty && currentNote.content.length > 0 {
+                                self.internalLogDebug("Skipping save of empty content to non-empty note: \(currentNote.getFileName())")
+                            } else {
+                                self.editArea.saveTextStorageContent(to: currentNote)
+                                // CRITICAL: Mark content as loaded to prevent ensureContentLoaded() from reloading stale disk content
+                                // This fixes content loss when rapidly toggling split view before auto-save completes
+                                currentNote.markContentAsLoaded()
+                            }
+                        }
+                    }
+
+                    let options = FillOptions(
+                        highlight: true,
+                        saveTyping: saveTyping,
+                        force: force,
+                        needScrollToCursor: true,
+                        previewOnly: previewOnly,
+                        animatePreview: animatePreview && !isRapidPreviewSwitch,
+                        preserveUndo: true  // Preserve undo stack during view refreshes (e.g. Split View toggle)
+                    )
+                    self.editArea.fill(note: note, options: options)
+                    self.editArea.setSelectedRange(NSRange(location: location, length: 0))
+                }
+            }
+        }
+    }
+
+    public func updateTitle(newTitle: String) {
+        let appName = Bundle.main.object(forInfoDictionaryKey: "CFBundleDisplayName") as? String ?? "Nextpage"
+        var title = newTitle
+
+        if newTitle.isValidUUID {
+            title = String()
+        }
+
+        // Temporarily disable title change tracking to avoid overwriting pending changes
+        UserDataService.instance.isUpdatingTitle = true
+        titleLabel.setStringValueSafely(title)
+        UserDataService.instance.isUpdatingTitle = false
+        titleLabel.currentEditor()?.selectedRange = NSRange(location: title.utf16.count, length: 0)
+        MainWindowController.shared()?.title = appName
+    }
+
+    func controlTextDidChange(_ obj: Notification) {
+        guard let textField = obj.object as? NSTextField, textField == titleLabel else {
+            return
+        }
+
+        // Don't track changes during programmatic updates
+        guard !UserDataService.instance.isUpdatingTitle else {
+            return
+        }
+
+        // Store the current edited title and the note it belongs to for later use
+        if let currentNote = EditTextView.note {
+            let currentTitle = titleLabel.stringValue.trimmingCharacters(in: NSCharacterSet.newlines)
+            UserDataService.instance.pendingTitleChange = (title: currentTitle, note: currentNote)
+        }
+    }
+
+    func controlTextDidEndEditing(_ obj: Notification) {
+        guard let textField = obj.object as? NSTextField, textField == titleLabel else {
+            return
+        }
+
+        if shouldProcess() {
+            saveTitleSafely()
+            restoreFocus()
+            // Clear pending change since we processed it
+            UserDataService.instance.pendingTitleChange = nil
+        } else {
+            refreshTitle()
+            // Keep pending change for handleSelectionChange to process
+        }
+    }
+
+    private func shouldProcess() -> Bool {
+        return titleLabel.isEditable && titleLabel.hasFocus()
+    }
+
+    private func restoreFocus() {
+        if let responder = titleLabel.restoreResponder {
+            view.window?.makeFirstResponder(responder)
+            titleLabel.restoreResponder = nil
+        } else {
+            view.window?.makeFirstResponder(notesTableView)
+        }
+    }
+
+    private func refreshTitle() {
+        guard let note = notesTableView.getSelectedNote() else { return }
+        let title = note.getTitleWithoutLabel()
+        updateTitle(newTitle: title)
+    }
+
+    func saveTitleSafely() {
+        let targetNote: Note?
+        let titleToSave: String
+
+        if let pendingChange = UserDataService.instance.pendingTitleChange {
+            // Authoritative path: pendingTitleChange ties the typed title to
+            // the exact note it was typed against, so this is correct even
+            // if the user already started navigating away.
+            targetNote = pendingChange.note
+            titleToSave = pendingChange.title
+        } else {
+            // Fallback path: no pendingChange means controlTextDidChange
+            // never fired for the current title text. The titleLabel value
+            // can be stale (still showing previous note) or unchanged.
+            // We must not write the visible title onto a different note,
+            // so when it diverges from the selected note's filename we
+            // surface a toast rather than silently dropping the input.
+            targetNote = notesTableView.getSelectedNote()
+            titleToSave = clean(titleLabel.stringValue)
+
+            if let note = targetNote {
+                let currentNoteTitle = note.getTitleWithoutLabel()
+                if titleToSave != currentNoteTitle {
+                    if !titleToSave.isEmpty {
+                        toast(message: I18n.str("Click the title again to rename~"), style: .failure)
+                    }
+                    return
+                }
+            }
+        }
+
+        guard let note = targetNote else { return }
+
+        let newTitle = titleToSave.trimmingCharacters(in: NSCharacterSet.newlines)
+        guard !newTitle.isEmpty else { return }
+
+        let currentName = note.getFileName()
+        guard currentName != newTitle else { return }
+
+        let result = attemptSave(note: note, title: newTitle, current: currentName)
+        handleResult(result, title: newTitle, note: note)
+    }
+
+    public func saveTitle(_ title: String, to note: Note) {
+        let newTitle = title.trimmingCharacters(in: NSCharacterSet.newlines)
+        guard !newTitle.isEmpty else { return }
+
+        let currentName = note.getFileName()
+        guard currentName != newTitle else { return }
+
+        let result = attemptSave(note: note, title: newTitle, current: currentName)
+        if case .success = result {
+            note.title = newTitle
+            notesTableView.reloadRow(note: note)
+        }
+    }
+
+    private func clean(_ title: String) -> String {
+        return title.trimmingCharacters(in: NSCharacterSet.newlines)
+    }
+
+    private func attemptSave(note: Note, title: String, current: String) -> SaveResult {
+        let fileName = cleanFileName(title)
+        let dst = note.project.url.appendingPathComponent(fileName).appendingPathExtension(note.url.pathExtension)
+        let isCaseChange = current.lowercased() == title.lowercased() && current != title
+
+        if (!FileManager.default.fileExists(atPath: dst.path) || isCaseChange) && note.move(to: dst) {
+            note.title = title
+            return .success
+        } else {
+            return .exists
+        }
+    }
+
+    private func cleanFileName(_ name: String) -> String {
+        return
+            name
+            .trimmingCharacters(in: CharacterSet.whitespaces)
+            .replacingOccurrences(of: ":", with: "-")
+            .replacingOccurrences(of: "/", with: ":")
+    }
+
+    private func handleResult(_ result: SaveResult, title: String, note: Note) {
+        switch result {
+        case .success:
+            updateTitle(newTitle: title)
+            notesTableView.reloadRow(note: note)
+            titleLabel.isEditable = true
+        case .exists:
+            updateTitle(newTitle: title)
+            titleLabel.resignFirstResponder()
+            showAlert(for: title)
+        }
+    }
+
+    private func showAlert(for title: String) {
+        NextpageAlert.show(
+            message: I18n.str("Please change the title"),
+            informativeText: String(format: I18n.str("This %@ under this folder already exists!"), title),
+            for: view.window
+        )
+    }
+
+    private enum SaveResult {
+        case success
+        case exists
+    }
+}

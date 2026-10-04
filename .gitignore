@@ -1,0 +1,16 @@
+/inspirations/
+
+# Xcode and Swift build output
+DerivedData/
+.build/
+build/
+*.xcuserstate
+xcuserdata/
+.swiftpm/
+
+# Local files
+.DS_Store
+*.log
+journal/
+CLAUDE.local.md
+AGENTS.override.md
